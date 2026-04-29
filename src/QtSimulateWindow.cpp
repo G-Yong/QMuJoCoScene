@@ -95,12 +95,26 @@ void QtSimulateWindow::loadModel(const QString &filename) {
 
 // ----------------------------------------------------------------- GL ----
 void QtSimulateWindow::swapBuffersFromRenderThread() {
-    if (m_ctx) m_ctx->swapBuffers(this);
+    if (!m_ctx) return;
+    // 防御式：MuJoCo 的 mjr_* 内部会通过 GLAD 直接调 wglMakeCurrent，
+    // 在某些驱动 / 多 surface 场景下会让 Qt 的 thread-local current 跟踪与
+    // 原生当前上下文脱节，从而触发：
+    //   "QOpenGLContext::swapBuffers() called without corresponding makeCurrent()"
+    // 在 swap 前显式 makeCurrent 一次即可保持两者一致；若已是当前则是 no-op。
+    if (QOpenGLContext::currentContext() != m_ctx) {
+        m_ctx->makeCurrent(this);
+    }
+    m_ctx->swapBuffers(this);
 }
 void QtSimulateWindow::setVSyncFromRenderThread(bool on) {
     // wglSwapIntervalEXT 支持在 context current 时运行时切换，此处直接调用。
     // getProcAddress 返回当前 context 的扩展函数指针，无需额外 include Windows 头文件。
     auto* ctx = QOpenGLContext::currentContext();
+    if (!ctx && m_ctx) {
+        // 同 swapBuffers：保持 Qt 的 current-context 跟踪与原生状态一致
+        m_ctx->makeCurrent(this);
+        ctx = QOpenGLContext::currentContext();
+    }
     if (!ctx) return;
     typedef int (*SwapIntervalFunc)(int);
     auto swapIntervalFn = reinterpret_cast<SwapIntervalFunc>(
