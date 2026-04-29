@@ -87,4 +87,4 @@ view->loadModel("new.xml"); // 热切换模型（线程安全）
 
 ## 效果
 
-![snapshot](asseets/snapshot.png)
+![snapshot](assets/snapshot.png)
