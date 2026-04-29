@@ -8,7 +8,7 @@
 - **无缝嵌入**：`SimulateView` 是标准 `QWidget`，可与任何 Qt 布局、主窗口或对话框组合使用。
 - **多线程架构**：渲染线程与物理仿真线程独立运行，主线程仅处理 Qt 事件，保证 UI 流畅。
 - **拖拽加载模型**：直接将 MuJoCo `.xml` 文件拖入窗口即可热切换模型。
-- **软件渲染兼容**：内置 Mesa3D 方案说明，支持在无独立 GPU / 虚拟机 / 远程桌面环境下运行。
+- **独立 GPU 优先**：通过导出 `NvOptimusEnablement` / `AmdPowerXpressRequestHighPerformance` 符号，在 NVIDIA Optimus / AMD PowerXpress 双显卡笔记本上自动选用独立 GPU，无需手动配置驱动面板。
 
 ## 架构
 
@@ -52,9 +52,20 @@ view->start("path/to/your/model.xml");
 
 打开 `demo/demo.pro`，选择 `Desktop Qt 5.15.2 MSVC2019 64bit` Kit，直接构建运行。
 
-**3. 虚拟机 / 远程桌面环境（可选）**
+**3. 双显卡笔记本**
 
-若运行时出现 `ERROR: OpenGL ARB_framebuffer_object required`，将 Qt 目录下的 `opengl32sw.dll` 重命名为 `opengl32.dll` 并放至可执行文件同目录（`.pro` 已配置自动拷贝）。
+`main.cpp` 顶部已导出 `NvOptimusEnablement` 和 `AmdPowerXpressRequestHighPerformance` 符号，NVIDIA / AMD 驱动会自动将本进程切至独立 GPU，无需额外配置。
+
+将此代码段复制到你自己项目的 `main.cpp` 顶部（必须在主可执行文件中，静态库 / DLL 中无效）：
+
+```cpp
+#if defined(_WIN32)
+extern "C" {
+    __declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
+    __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+#endif
+```
 
 ## 在自己的项目中使用
 

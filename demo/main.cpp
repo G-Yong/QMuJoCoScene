@@ -7,26 +7,35 @@
 #ifndef ASSETS_DIR
 #define ASSETS_DIR "."
 #endif
+
+// ---------------------------------------------------------------------------
+// 强制混合显卡（NVIDIA Optimus / AMD PowerXpress）选用独立 GPU
+//
+// 背景：在带集显 + 独显的 Windows 机器上，操作系统默认让进程跑在集显上。
+//      若集显驱动缺失/异常，Windows 会回退到 "Microsoft GDI Generic" 软件
+//      OpenGL 1.1（无 ARB_framebuffer_object），导致 MuJoCo 的
+//      mjr_makeContext 报 "ERROR: OpenGL ARB_framebuffer_object required"。
+//
+// 修复：在 *主可执行文件* 中导出下面两个符号，NVIDIA / AMD 驱动会识别并
+//      自动把本进程切到独显（这是业界标准做法，不需要用户手动改 NV 控制面板）。
+//
+// 注意：必须导出在 .exe 主模块。放在静态库 / DLL 里无效，所以写在 main.cpp。
+// 参考：
+//   - https://docs.nvidia.com/gameworks/content/technologies/desktop/optimus.htm
+//   - AMD Driver Profile XML, "PowerXpressRequestHighPerformance"
+// ---------------------------------------------------------------------------
+#if defined(_WIN32)
+extern "C" {
+    __declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
+    __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+#endif
+
 int main(int argc, char *argv[])
 {
-    // ------------------------------------------------------------------
-    // OpenGL 后端选择
-    // ------------------------------------------------------------------
-    // MuJoCo 的 mjr_makeContext 内部使用 GLAD 加载桌面 OpenGL，
-    // 并要求 ARB_framebuffer_object（GL 3.0+ 核心功能）。
-    // 在虚拟机 / 远程桌面 / 没有显卡驱动 的环境下，Windows 默认提供的
-    // 是「Microsoft GDI Generic」OpenGL 1.1，没有 FBO，会直接报：
-    //     ERROR: OpenGL ARB_framebuffer_object required
-    //
-    // 解决：把 Qt 自带的 Mesa3D 软件渲染器 opengl32sw.dll 重命名为
-    // opengl32.dll 放到可执行文件同目录（.pro 里已配置自动拷贝）。
-    // Windows DLL 搜索顺序会优先加载应用程序目录下的 opengl32.dll，
-    // 因此 Qt 与 MuJoCo（通过 -lopengl32 链接到系统 opengl32）都会
-    // 使用这份 Mesa 软件实现，提供 GL 3.3 + ARB_framebuffer_object。
-    //
-    // 配合本目的需使用 AA_UseDesktopOpenGL（不要用 AA_UseSoftwareOpenGL，
-    // 后者会让 Qt 加载 opengl32sw.dll，但 MuJoCo 仍然走系统 opengl32.dll，
-    // 二者用不同 GL 实现，会失败）。
+    // 使用系统硬件 OpenGL（独立 GPU 由文件头部的 NvOptimusEnablement 导出符号强制选定）。
+    // MuJoCo 的 mjr_makeContext 要求 ARB_framebuffer_object（GL 3.0+ 核心功能），
+    // 独立 GPU 驱动可正常满足此要求。
     QApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
     QApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
 
