@@ -88,3 +88,6 @@ view->loadModel("new.xml"); // 热切换模型（线程安全）
 ## 效果
 
 ![snapshot](assets/snapshot.png)
+
+## 模型库
+MuJoCo 官方还提供了一些示例模型，可以在 [MuJoCo 模型库](https://mujoco.readthedocs.io/en/stable/models.html) 中找到。

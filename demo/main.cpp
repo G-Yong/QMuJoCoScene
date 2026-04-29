@@ -46,7 +46,7 @@ int main(int argc, char *argv[])
     fmt.setDepthBufferSize(24);
     fmt.setStencilBufferSize(8);
     fmt.setSamples(4);
-    fmt.setSwapInterval(0);  // 禁用 vsync；物理时序由仿真循环控制，不需要帧同步锁速
+    // fmt.setSwapInterval(0);  // 禁用 vsync；物理时序由仿真循环控制，不需要帧同步锁速
     QSurfaceFormat::setDefaultFormat(fmt);
 
     QApplication app(argc, argv);
