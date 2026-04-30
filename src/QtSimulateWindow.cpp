@@ -105,10 +105,16 @@ void QtSimulateWindow::swapBuffersFromRenderThread() {
     // 在某些驱动 / 多 surface 场景下会让 Qt 的 thread-local current 跟踪与
     // 原生当前上下文脱节，从而触发：
     //   "QOpenGLContext::swapBuffers() called without corresponding makeCurrent()"
-    // 在 swap 前显式 makeCurrent 一次即可保持两者一致；若已是当前则是 no-op。
-    if (QOpenGLContext::currentContext() != m_ctx) {
-        m_ctx->makeCurrent(this);
-    }
+    //
+    // 注意：不能用 QOpenGLContext::currentContext()==m_ctx 作为短路条件——
+    // Qt 内部 swapBuffers 的告警基于 QOpenGLContextPrivate::makeCurrentTracker
+    // 这个 TLS 标志位：makeCurrent() 把它置 true，swapBuffers() 把它置 false，
+    // 若连续两次 swap 之间没有 Qt 的 makeCurrent，就会告警。而 currentContext()
+    // 仅反映 Qt TLS 的"哪个 context 当前"，并不会因 mjr_* 原生切换而改变，所以
+    // 用它判断会让我们以为"还在当前"而跳过 makeCurrent，结果 tracker 仍是 false，
+    // 下一帧 swap 就告警。这里无条件调用 makeCurrent，已经是当前则只是同步一下
+    // tracker 与平台状态，开销可忽略。
+    m_ctx->makeCurrent(this);
     m_ctx->swapBuffers(this);
 }
 void QtSimulateWindow::setVSyncFromRenderThread(bool on) {
