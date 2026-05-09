@@ -173,6 +173,23 @@ void QtPlatformUIAdapter::SwapBuffers() {
 
     // 通知宿主：scenegraph 该重绘了
     if (m_host) m_host->onFrameRendered();
+
+    // 帧节拍：等 Quick 渲染线程把上一帧取走后再进入下一轮 mjr_render。
+    // 超时保护：Quick 被隐藏 / 表面不可见时仍能退出。
+    {
+        std::unique_lock<std::mutex> lk(m_consumeMtx);
+        m_consumeCv.wait_for(lk, std::chrono::milliseconds(50),
+                             [this] { return m_frameConsumed || m_shouldClose.load(); });
+        m_frameConsumed = false;
+    }
+}
+
+void QtPlatformUIAdapter::NotifyConsumed() {
+    {
+        std::lock_guard<std::mutex> lk(m_consumeMtx);
+        m_frameConsumed = true;
+    }
+    m_consumeCv.notify_one();
 }
 
 void QtPlatformUIAdapter::SetVSync(bool /*enabled*/) {
@@ -247,7 +264,15 @@ void QtPlatformUIAdapter::PostResize(int w, int h) {
     m_queue.emplace_back([this, w, h] { OnWindowResize(w, h); });
 }
 
-void QtPlatformUIAdapter::PostClose() { m_shouldClose.store(true); }
+void QtPlatformUIAdapter::PostClose() {
+    m_shouldClose.store(true);
+    // 唤醒可能在 SwapBuffers 里等待消费信号的渲染线程，避免关闭时偷偷走丢 50ms。
+    {
+        std::lock_guard<std::mutex> lk(m_consumeMtx);
+        m_frameConsumed = true;
+    }
+    m_consumeCv.notify_all();
+}
 
 void QtPlatformUIAdapter::SetModifiers(bool ctrl, bool shift, bool alt) {
     m_modCtrl.store(ctrl);

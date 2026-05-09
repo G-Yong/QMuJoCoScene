@@ -19,6 +19,7 @@
 // ---------------------------------------------------------------------------
 
 #include <atomic>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -104,6 +105,12 @@ public:
     // 渲染线程：在 GL context 当前的情况下释放我们持有的 GL 资源
     void ReleaseSharedGL();
 
+    // ---- 帧节拍（mujoco 渲染 vs Qt Quick 场景图渲染）----
+    // Qt Quick 渲染线程在从 m_sharedTex 采样完成后调用，表示上一帧已被消费。
+    void NotifyConsumed();
+    // mujoco 渲染线程在 SwapBuffers 内调用；等待上一帧被消费后再进入下一帧，
+    // 带超时以避免 Quick 不可见时冻住。
+
 private:
     IMujocoHost* m_host;
 
@@ -142,6 +149,12 @@ private:
     bool EnsureSharedTarget(int w, int h);
 
     std::atomic<bool>   m_shouldClose {false};
+
+    // 帧节拍同步：mujoco 渲染线程在每交出一帧后等待 Quick 取走，
+    // 避免以 GPU 极限速度不断覆写共享纹理、占用 Quick 合成资源。
+    std::mutex                m_consumeMtx;
+    std::condition_variable   m_consumeCv;
+    bool                      m_frameConsumed = true;
 
     // 事件队列
     std::mutex                          m_qMtx;

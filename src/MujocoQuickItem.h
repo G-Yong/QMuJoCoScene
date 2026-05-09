@@ -55,6 +55,9 @@ public:
     unsigned int currentSourceTexture() const;
     QSize        currentSourceSize() const;
 
+    // Quick 渲染线程：采样完共享纹理后调用，解除 mujoco 渲染线程的等待。
+    void notifyFrameConsumed();
+
     // IMujocoHost
     void onFrameRendered() override;
     void onSetTitle(const QString& title) override;

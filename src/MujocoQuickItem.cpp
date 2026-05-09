@@ -43,7 +43,9 @@ public:
 
     QOpenGLFramebufferObject* createFramebufferObject(const QSize& size) override {
         QOpenGLFramebufferObjectFormat fmt;
-        fmt.setAttachment(QOpenGLFramebufferObject::CombinedDepthStencil);
+        // 我们只需要颜色 attachment：blit 不需要深度 / 模板，
+        // 去掉可以节省大窗口下的显存带宽。
+        fmt.setAttachment(QOpenGLFramebufferObject::NoAttachment);
         fmt.setSamples(0);
         return new QOpenGLFramebufferObject(size, fmt);
     }
@@ -87,6 +89,9 @@ public:
         gl->glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
         gl->glBindFramebuffer(GL_FRAMEBUFFER, dst->handle());
         m_item->window()->resetOpenGLState();
+
+        // 告知 mujoco 渲染线程：共享纹理已被取走，可以生成下一帧。
+        m_item->notifyFrameConsumed();
     }
 
     ~MujocoFboRenderer() override {
@@ -133,6 +138,10 @@ unsigned int MujocoQuickItem::currentSourceTexture() const {
 QSize MujocoQuickItem::currentSourceSize() const {
     if (!m_adapterRaw) return {};
     return {m_adapterRaw->offscreenWidth(), m_adapterRaw->offscreenHeight()};
+}
+
+void MujocoQuickItem::notifyFrameConsumed() {
+    if (m_adapterRaw) m_adapterRaw->NotifyConsumed();
 }
 
 // ----------------------------------------------------------------- 启停 ----
