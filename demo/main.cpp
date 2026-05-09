@@ -57,7 +57,7 @@ int main(int argc, char *argv[])
     // 默认模型路径 —— 改成你自己的路径
     view->engine()->rootContext()->setContextProperty(
         "initialXmlPath",
-        QStringLiteral("C:/Users/Administrator/Desktop/robotSim/qt-mujoco/"
+        QStringLiteral("../../../../"
                        "mujoco-3.8.0-windows-x86_64/model/cards/cards.xml"));
     view->setSource(QUrl("qrc:/main.qml"));
     view->show();

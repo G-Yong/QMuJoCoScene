@@ -31,6 +31,20 @@ constexpr double  syncMisalign       = 0.1;
 constexpr double  simRefreshFraction = 0.7;
 constexpr int     kErrorLength       = 1024;
 using Seconds = std::chrono::duration<double>;
+
+int boolToInt(bool value) { return value ? 1 : 0; }
+
+bool isValidIndex(int index, int count) {
+    return index >= 0 && index < count;
+}
+
+int bitFlagIndex(int bit, int count) {
+    if (bit <= 0) return -1;
+    for (int i = 0; i < count; ++i) {
+        if (bit == (1 << i)) return i;
+    }
+    return -1;
+}
 } // namespace
 
 // ===========================================================================
@@ -234,6 +248,521 @@ void MujocoQuickItem::withSimulation(std::function<void(const mjModel*, mjData*)
     callback(m_sim->m_, m_sim->d_);
 }
 
+void MujocoQuickItem::withMutableSimulation(std::function<void(mjModel*, mjData*)> callback) {
+    if (!m_sim) return;
+    std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+    if (!m_sim->m_ || !m_sim->d_) return;
+    callback(m_sim->m_, m_sim->d_);
+    lk.unlock();
+    requestRenderUpdate();
+}
+
+void MujocoQuickItem::requestRenderUpdate() {
+    if (QThread::currentThread() == thread()) {
+        update();
+    } else {
+        QMetaObject::invokeMethod(this, "update", Qt::QueuedConnection);
+    }
+}
+
+void MujocoQuickItem::applyBooleanPropertiesTo(mujoco::Simulate& sim) {
+    sim.run = boolToInt(m_simulationRunning.load());
+    sim.help = boolToInt(m_helpVisible.load());
+    sim.info = boolToInt(m_infoVisible.load());
+    sim.profiler = boolToInt(m_profilerVisible.load());
+    sim.sensor = boolToInt(m_sensorVisible.load());
+    sim.pause_update = boolToInt(m_pauseUpdateEnabled.load());
+    sim.busywait = boolToInt(m_busyWaitEnabled.load());
+    sim.ui0_enable = boolToInt(m_leftUiVisible.load());
+    sim.ui1_enable = boolToInt(m_rightUiVisible.load());
+
+    const int fullscreen = boolToInt(m_fullscreenRequested.load());
+    if (sim.fullscreen != fullscreen && sim.platform_ui) {
+        sim.platform_ui->ToggleFullscreen();
+    }
+    sim.fullscreen = fullscreen;
+
+    sim.vsync = boolToInt(m_vSyncEnabled.load());
+    if (sim.platform_ui) sim.platform_ui->SetVSync(sim.vsync);
+
+    sim.pending_.ui_update_simulation = true;
+    sim.pending_.ui_update_rendering = true;
+}
+
+bool MujocoQuickItem::withSimulateLocked(const std::function<void(mujoco::Simulate&)>& callback) {
+    if (!m_sim) return false;
+    {
+        std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+        callback(*m_sim);
+    }
+    requestRenderUpdate();
+    return true;
+}
+
+void MujocoQuickItem::setSimulationRunning(bool running) {
+    if (m_simulationRunning.exchange(running) == running) return;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        sim.run = boolToInt(running);
+        if (sim.run) {
+            sim.scrub_index = 0;
+            sim.pert.active = 0;
+        }
+        sim.pending_.ui_update_simulation = true;
+    });
+    emit simulationRunningChanged();
+}
+
+bool MujocoQuickItem::toggleSimulationRunning() {
+    setSimulationRunning(!simulationRunning());
+    return true;
+}
+
+bool MujocoQuickItem::stepSimulationForward() {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (sim.is_passive_ || !sim.m_ || !sim.d_ || sim.run) return;
+        if (sim.scrub_index < 0) {
+            sim.scrub_index++;
+            sim.pending_.load_from_history = true;
+            sim.pending_.ui_update_simulation = true;
+        } else {
+            mj_step(sim.m_, sim.d_);
+            sim.AddToHistory();
+        }
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::stepSimulationBackward() {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (sim.is_passive_ || !sim.m_) return;
+        sim.run = 0;
+        sim.scrub_index = mjMAX(sim.scrub_index - 1, 1 - sim.nhistory_);
+        sim.pending_.load_from_history = true;
+        sim.pending_.ui_update_simulation = true;
+        applied = true;
+    });
+    if (applied && m_simulationRunning.exchange(false)) {
+        emit simulationRunningChanged();
+    }
+    return applied;
+}
+
+bool MujocoQuickItem::resetSimulation() {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (sim.is_passive_ || !sim.m_ || !sim.d_) return;
+        sim.pending_.reset = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::zeroControls() {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (sim.is_passive_ || !sim.m_ || !sim.d_) return;
+        sim.pending_.zero_ctrl = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setKeyframeIndex(int index) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !isValidIndex(index, sim.nkey_)) return;
+        sim.key = index;
+        sim.pending_.ui_update_simulation = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::loadKeyframe() {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (sim.is_passive_ || !sim.m_ || !sim.d_ || !isValidIndex(sim.key, sim.nkey_)) return;
+        sim.pending_.load_key = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::saveKeyframe() {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (sim.is_passive_ || !sim.m_ || !sim.d_ || !isValidIndex(sim.key, sim.nkey_)) return;
+        sim.pending_.save_key = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setControlNoise(double scale, double rate) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        sim.ctrl_noise_std = scale;
+        sim.ctrl_noise_rate = rate;
+        sim.pending_.ui_update_simulation = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setRealTimeSpeedIndex(int index) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        const int count = int(sizeof(mujoco::Simulate::percentRealTime) /
+                              sizeof(mujoco::Simulate::percentRealTime[0]));
+        if (sim.is_passive_ || !isValidIndex(index, count)) return;
+        sim.real_time_index = index;
+        sim.speed_changed = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::speedUpSimulation() {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (sim.is_passive_ || sim.real_time_index <= 0) return;
+        sim.real_time_index--;
+        sim.speed_changed = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::slowDownSimulation() {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        const int count = int(sizeof(mujoco::Simulate::percentRealTime) /
+                              sizeof(mujoco::Simulate::percentRealTime[0]));
+        if (sim.is_passive_ || sim.real_time_index >= count - 1) return;
+        sim.real_time_index++;
+        sim.speed_changed = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setFreeCamera() {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        sim.cam.type = mjCAMERA_FREE;
+        sim.camera = 0;
+        sim.pending_.ui_update_rendering = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setTrackingCamera(int bodyId) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        mjModel* model = sim.is_passive_ ? sim.m_passive_ : sim.m_;
+        if (!model) return;
+        int target = bodyId >= 0 ? bodyId : sim.pert.select;
+        if (target <= 0 || target >= model->nbody) return;
+        sim.cam.type = mjCAMERA_TRACKING;
+        sim.cam.trackbodyid = target;
+        sim.cam.fixedcamid = -1;
+        sim.camera = 1;
+        sim.pending_.ui_update_rendering = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setFixedCamera(int cameraIndex) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!isValidIndex(cameraIndex, sim.ncam_)) return;
+        sim.cam.type = mjCAMERA_FIXED;
+        sim.cam.fixedcamid = cameraIndex;
+        sim.camera = cameraIndex + 2;
+        sim.pending_.ui_update_rendering = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::cycleFixedCamera(int direction) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (sim.ncam_ <= 0 || direction == 0) return;
+        int current = sim.cam.type == mjCAMERA_FIXED ? sim.cam.fixedcamid : -1;
+        int next = current + (direction > 0 ? 1 : -1);
+        if (next < 0) next = sim.ncam_ - 1;
+        if (next >= sim.ncam_) next = 0;
+        sim.cam.type = mjCAMERA_FIXED;
+        sim.cam.fixedcamid = next;
+        sim.camera = next + 2;
+        sim.pending_.ui_update_rendering = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::alignView() {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_) return;
+        sim.pending_.align = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setFrameVisualization(int frame) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!isValidIndex(frame, mjNFRAME)) return;
+        sim.opt.frame = frame;
+        sim.pending_.ui_update_rendering = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::cycleFrameVisualization() {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        sim.opt.frame = (sim.opt.frame + 1) % mjNFRAME;
+        sim.pending_.ui_update_rendering = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setLabelVisualization(int label) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!isValidIndex(label, mjNLABEL)) return;
+        sim.opt.label = label;
+        sim.pending_.ui_update_rendering = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::cycleLabelVisualization() {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        sim.opt.label = (sim.opt.label + 1) % mjNLABEL;
+        sim.pending_.ui_update_rendering = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setVisualizationFlag(int flag, bool enabled) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!isValidIndex(flag, mjNVISFLAG)) return;
+        sim.opt.flags[flag] = enabled;
+        sim.pending_.ui_update_rendering = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setRenderingFlag(int flag, bool enabled) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!isValidIndex(flag, mjNRNDFLAG)) return;
+        sim.scn.flags[flag] = enabled;
+        sim.pending_.ui_update_rendering = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setVisualGroupVisible(mjtByte* groups, int group, bool visible) {
+    if (!groups || !isValidIndex(group, mjNGROUP)) return false;
+    groups[group] = visible;
+    return true;
+}
+
+bool MujocoQuickItem::setGeomGroupVisible(int group, bool visible) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        applied = setVisualGroupVisible(sim.opt.geomgroup, group, visible);
+        if (applied) sim.pending_.ui_update_rendering = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setSiteGroupVisible(int group, bool visible) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        applied = setVisualGroupVisible(sim.opt.sitegroup, group, visible);
+        if (applied) sim.pending_.ui_update_rendering = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setJointGroupVisible(int group, bool visible) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        applied = setVisualGroupVisible(sim.opt.jointgroup, group, visible);
+        if (applied) sim.pending_.ui_update_rendering = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setTendonGroupVisible(int group, bool visible) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        applied = setVisualGroupVisible(sim.opt.tendongroup, group, visible);
+        if (applied) sim.pending_.ui_update_rendering = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setActuatorGroupVisible(int group, bool visible) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        applied = setVisualGroupVisible(sim.opt.actuatorgroup, group, visible);
+        if (applied) sim.pending_.ui_update_rendering = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setFlexGroupVisible(int group, bool visible) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        applied = setVisualGroupVisible(sim.opt.flexgroup, group, visible);
+        if (applied) sim.pending_.ui_update_rendering = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setSkinGroupVisible(int group, bool visible) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        applied = setVisualGroupVisible(sim.opt.skingroup, group, visible);
+        if (applied) sim.pending_.ui_update_rendering = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setPhysicsDisableFlag(int disableBit, bool disabled) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        mjModel* model = sim.is_passive_ ? sim.m_passive_ : sim.m_;
+        const int index = bitFlagIndex(disableBit, mjNDISABLE);
+        if (!model || index < 0) return;
+        sim.disable[index] = boolToInt(disabled);
+        if (disabled) model->opt.disableflags |= disableBit;
+        else model->opt.disableflags &= ~disableBit;
+        sim.pending_.ui_update_physics = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setPhysicsEnableFlag(int enableBit, bool enabled) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        mjModel* model = sim.is_passive_ ? sim.m_passive_ : sim.m_;
+        const int index = bitFlagIndex(enableBit, mjNENABLE);
+        if (!model || index < 0) return;
+        sim.enable[index] = boolToInt(enabled);
+        if (enabled) model->opt.enableflags |= enableBit;
+        else model->opt.enableflags &= ~enableBit;
+        sim.pending_.ui_update_physics = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setActuatorGroupEnabled(int group, bool enabled) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        mjModel* model = sim.is_passive_ ? sim.m_passive_ : sim.m_;
+        if (!model || !isValidIndex(group, mjNGROUP)) return;
+        sim.enableactuator[group] = boolToInt(enabled);
+        if (enabled) model->opt.disableactuator &= ~(1 << group);
+        else model->opt.disableactuator |= (1 << group);
+        sim.pending_.ui_update_physics = true;
+        sim.pending_.ui_remake_ctrl = true;
+        applied = true;
+    });
+    return applied;
+}
+
+void MujocoQuickItem::setHelpVisible(bool visible) {
+    if (m_helpVisible.exchange(visible) == visible) return;
+    withSimulateLocked([&](mujoco::Simulate& sim) { sim.help = boolToInt(visible); });
+    emit helpVisibleChanged();
+}
+
+void MujocoQuickItem::setInfoVisible(bool visible) {
+    if (m_infoVisible.exchange(visible) == visible) return;
+    withSimulateLocked([&](mujoco::Simulate& sim) { sim.info = boolToInt(visible); });
+    emit infoVisibleChanged();
+}
+
+void MujocoQuickItem::setProfilerVisible(bool visible) {
+    if (m_profilerVisible.exchange(visible) == visible) return;
+    withSimulateLocked([&](mujoco::Simulate& sim) { sim.profiler = boolToInt(visible); });
+    emit profilerVisibleChanged();
+}
+
+void MujocoQuickItem::setSensorVisible(bool visible) {
+    if (m_sensorVisible.exchange(visible) == visible) return;
+    withSimulateLocked([&](mujoco::Simulate& sim) { sim.sensor = boolToInt(visible); });
+    emit sensorVisibleChanged();
+}
+
+void MujocoQuickItem::setPauseUpdateEnabled(bool enabled) {
+    if (m_pauseUpdateEnabled.exchange(enabled) == enabled) return;
+    withSimulateLocked([&](mujoco::Simulate& sim) { sim.pause_update = boolToInt(enabled); });
+    emit pauseUpdateEnabledChanged();
+}
+
+void MujocoQuickItem::setFullscreenRequested(bool enabled) {
+    if (m_fullscreenRequested.exchange(enabled) == enabled) return;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (sim.fullscreen != boolToInt(enabled) && sim.platform_ui) {
+            sim.platform_ui->ToggleFullscreen();
+        }
+        sim.fullscreen = boolToInt(enabled);
+    });
+    emit fullscreenRequestedChanged();
+}
+
+void MujocoQuickItem::setVSyncEnabled(bool enabled) {
+    if (m_vSyncEnabled.exchange(enabled) == enabled) return;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        sim.vsync = boolToInt(enabled);
+        if (sim.platform_ui) sim.platform_ui->SetVSync(enabled);
+    });
+    emit vSyncEnabledChanged();
+}
+
+void MujocoQuickItem::setBusyWaitEnabled(bool enabled) {
+    if (m_busyWaitEnabled.exchange(enabled) == enabled) return;
+    withSimulateLocked([&](mujoco::Simulate& sim) { sim.busywait = boolToInt(enabled); });
+    emit busyWaitEnabledChanged();
+}
+
+void MujocoQuickItem::setLeftUiVisible(bool visible) {
+    if (m_leftUiVisible.exchange(visible) == visible) return;
+    withSimulateLocked([&](mujoco::Simulate& sim) { sim.ui0_enable = boolToInt(visible); });
+    emit leftUiVisibleChanged();
+}
+
+void MujocoQuickItem::setRightUiVisible(bool visible) {
+    if (m_rightUiVisible.exchange(visible) == visible) return;
+    withSimulateLocked([&](mujoco::Simulate& sim) { sim.ui1_enable = boolToInt(visible); });
+    emit rightUiVisibleChanged();
+}
+
 // ----------------------------------------------------------------- IMujocoHost
 void MujocoQuickItem::onFrameRendered() {
     // 在 mujoco 渲染线程被调用，转发到 GUI 线程触发 update()
@@ -404,7 +933,10 @@ void MujocoQuickItem::renderThreadMain() {
         std::move(adapter_unique),
         &cam, &opt, &pert, /*is_passive=*/false);
 
-    m_sim->vsync = 0; // 离屏渲染，不需要垂直同步
+    {
+        std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+        applyBooleanPropertiesTo(*m_sim);
+    }
 
     // adapter 已就绪，把当前几何信息再推一次
     QMetaObject::invokeMethod(this, [this] { updateGeometryToAdapter(); },
