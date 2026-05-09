@@ -24,6 +24,16 @@ Item {
         }
     }
 
+    Text{
+        anchors.centerIn: parent
+        text: "Label from qml"
+        color: "white"
+        font.pixelSize: 20
+        opacity: 0.5
+        style: Text.Outline
+
+    }
+
     // 拖入 .xml / .mjb 即加载
     DropArea {
         anchors.fill: parent

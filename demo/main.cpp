@@ -6,6 +6,7 @@
 #include <QSurfaceFormat>
 #include <QQuickWidget>
 #include <QApplication>
+#include <QLabel>
 
 #ifndef ASSETS_DIR
 #define ASSETS_DIR "."
@@ -51,14 +52,24 @@ int main(int argc, char *argv[])
     qmlRegisterType<MujocoQuickItem>("Mujoco", 1, 0, "MujocoView");
 
     QQuickWidget *view = new QQuickWidget();
+    view->setWindowTitle("MuJoCo in Qt Quick Demo");
+    view->setResizeMode(QQuickWidget::SizeRootObjectToView);
     // 默认模型路径 —— 改成你自己的路径
     view->engine()->rootContext()->setContextProperty(
         "initialXmlPath",
         QStringLiteral("C:/Users/Administrator/Desktop/robotSim/qt-mujoco/"
                        "mujoco-3.8.0-windows-x86_64/model/cards/cards.xml"));
-    view->setResizeMode(QQuickWidget::SizeRootObjectToView);
     view->setSource(QUrl("qrc:/main.qml"));
     view->show();
+
+    // 叠加一个纯文本标签，表示可以把控件叠加到场景之上
+    QLabel *label = new QLabel(view);
+    label->setStyleSheet("QLabel { color: white; background-color: rgba(0, 0, 0, 128); font-size: 16px; padding: 4px; border-radius: 4px; }");
+    label->setAlignment(Qt::AlignCenter);
+    label->setAttribute(Qt::WA_TransparentForMouseEvents); // 鼠标事件穿透
+    label->setText("Label from C++");
+    label->move(view->width() / 2.0, 10);
+    label->show();
 
     return app.exec();
 }
