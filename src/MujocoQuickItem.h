@@ -23,6 +23,7 @@
 #include <QString>
 #include <QSize>
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -50,6 +51,13 @@ public:
     Q_INVOKABLE void start(const QString& filename = QString());
     Q_INVOKABLE void stop();
     Q_INVOKABLE void loadModel(const QString& filename);
+
+    // 线程安全地访问仿真数据（在 sim.mtx 锁内执行 callback）。
+    // callback 在物理/渲染线程之外的调用线程中执行，持锁期间
+    // 可安全读写 mjModel / mjData，但不可长时间阻塞或在内部
+    // 调用任何会再次加锁 sim.mtx 的方法。
+    // 若仿真尚未就绪（m / d 为空），callback 不会被调用。
+    void withSimulation(std::function<void(const mjModel*, mjData*)> callback) const;
 
     // 给 Renderer 在 Quick 渲染线程读取的快照
     unsigned int currentSourceTexture() const;

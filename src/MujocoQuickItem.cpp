@@ -227,6 +227,13 @@ void MujocoQuickItem::loadModel(const QString& filename) {
     m_hasPendingLoad.store(true);
 }
 
+void MujocoQuickItem::withSimulation(std::function<void(const mjModel*, mjData*)> callback) const {
+    if (!m_sim) return;
+    std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+    if (!m_sim->m_ || !m_sim->d_) return;
+    callback(m_sim->m_, m_sim->d_);
+}
+
 // ----------------------------------------------------------------- IMujocoHost
 void MujocoQuickItem::onFrameRendered() {
     // 在 mujoco 渲染线程被调用，转发到 GUI 线程触发 update()
