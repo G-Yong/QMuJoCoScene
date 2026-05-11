@@ -169,6 +169,7 @@ Item {
                     PanelToggle { label: "Info"; checked: mujoco.infoVisible; onToggled: function(value) { mujoco.infoVisible = value; root.refocusMujoco() } }
                     PanelToggle { label: "Profiler"; checked: mujoco.profilerVisible; onToggled: function(value) { mujoco.profilerVisible = value; root.refocusMujoco() } }
                     PanelToggle { label: "Sensor"; checked: mujoco.sensorVisible; onToggled: function(value) { mujoco.sensorVisible = value; root.refocusMujoco() } }
+                    PanelToggle { label: "Status overlay"; checked: mujoco.statusOverlayVisible; onToggled: function(value) { mujoco.statusOverlayVisible = value; root.refocusMujoco() } }
                     PanelToggle { label: "Pause update"; checked: mujoco.pauseUpdateEnabled; onToggled: function(value) { mujoco.pauseUpdateEnabled = value; root.refocusMujoco() } }
                     PanelToggle { label: "Fullscreen"; checked: mujoco.fullscreenRequested; onToggled: function(value) { mujoco.fullscreenRequested = value; root.refocusMujoco() } }
                     PanelToggle { label: "VSync"; checked: mujoco.vSyncEnabled; onToggled: function(value) { mujoco.vSyncEnabled = value; root.refocusMujoco() } }

@@ -192,6 +192,7 @@ class Simulate {
   int profiler = 0;
   int sensor = 0;
   int pause_update = 0;
+  int status_overlay = 1;
   int fullscreen = 0;
   int vsync = 1;
   int busywait = 0;
@@ -223,6 +224,7 @@ class Simulate {
 
   // strings
   char load_error[kMaxFilenameLength] = "";
+  char status_overlay_text[30] = "";
   char dropfilename[kMaxFilenameLength] = "";
   char filename[kMaxFilenameLength] = "";
   char previous_filename[kMaxFilenameLength] = "";

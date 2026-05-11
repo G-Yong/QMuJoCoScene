@@ -53,6 +53,8 @@ class MujocoQuickItem : public QQuickFramebufferObject, public mjqt::IMujocoHost
     Q_PROPERTY(bool busyWaitEnabled READ busyWaitEnabled WRITE setBusyWaitEnabled NOTIFY busyWaitEnabledChanged)
     Q_PROPERTY(bool leftUiVisible READ leftUiVisible WRITE setLeftUiVisible NOTIFY leftUiVisibleChanged)
     Q_PROPERTY(bool rightUiVisible READ rightUiVisible WRITE setRightUiVisible NOTIFY rightUiVisibleChanged)
+    Q_PROPERTY(bool statusOverlayVisible READ statusOverlayVisible WRITE setStatusOverlayVisible NOTIFY statusOverlayVisibleChanged)
+    Q_PROPERTY(QString statusOverlayText READ statusOverlayText NOTIFY statusOverlayTextChanged)
     Q_PROPERTY(QString modelTitle READ modelTitle NOTIFY modelTitleChanged)
 public:
     explicit MujocoQuickItem(QQuickItem *parent = nullptr);
@@ -127,8 +129,30 @@ public:
 
     Q_INVOKABLE bool setFrameVisualization(int frame);
     Q_INVOKABLE bool cycleFrameVisualization();
+
+    // 设置场景中物体的标签显示模式（对应 mjOption::label）。
+    // label 取值为 mjtLabel 枚举（定义于 mujoco/mjvisualize.h）：
+    //   mjLABEL_NONE        = 0   — 不显示任何标签
+    //   mjLABEL_BODY              — 显示 body 名称
+    //   mjLABEL_JOINT             — 显示 joint 名称
+    //   mjLABEL_GEOM              — 显示 geom 名称
+    //   mjLABEL_SITE              — 显示 site 名称
+    //   mjLABEL_CAMERA            — 显示 camera 名称
+    //   mjLABEL_LIGHT             — 显示 light 名称
+    //   mjLABEL_TENDON            — 显示 tendon 名称
+    //   mjLABEL_ACTUATOR          — 显示 actuator 名称
+    //   mjLABEL_CONSTRAINT        — 显示 constraint 名称
+    //   mjLABEL_FLEX              — 显示 flex 名称
+    //   mjLABEL_SKIN              — 显示 skin 名称
+    //   mjLABEL_SELECTION         — 显示当前选中对象名称
+    //   mjLABEL_SELPNT            — 显示选中点坐标
+    //   mjLABEL_CONTACTPOINT      — 显示接触点信息
+    //   mjLABEL_CONTACTFORCE      — 显示接触力大小
+    //   mjLABEL_ISLAND            — 显示约束岛 ID
+    // 返回值：label 合法且模拟已加载时返回 true，否则返回 false（不做任何修改）。
     Q_INVOKABLE bool setLabelVisualization(int label);
     Q_INVOKABLE bool cycleLabelVisualization();
+    
     Q_INVOKABLE bool setVisualizationFlag(int flag, bool enabled);
     Q_INVOKABLE bool setRenderingFlag(int flag, bool enabled);
     Q_INVOKABLE bool setGeomGroupVisible(int group, bool visible);
@@ -177,6 +201,8 @@ public:
     bool busyWaitEnabled() const { return m_busyWaitEnabled.load(); }
     bool leftUiVisible() const { return m_leftUiVisible.load(); }
     bool rightUiVisible() const { return m_rightUiVisible.load(); }
+    bool statusOverlayVisible() const { return m_statusOverlayVisible.load(); }
+    QString statusOverlayText() const { return m_statusOverlayText; }
     QString modelTitle() const { return m_modelTitle; }
 
     Q_INVOKABLE void setHelpVisible(bool visible);
@@ -189,6 +215,7 @@ public:
     Q_INVOKABLE void setBusyWaitEnabled(bool enabled);
     Q_INVOKABLE void setLeftUiVisible(bool visible);
     Q_INVOKABLE void setRightUiVisible(bool visible);
+    Q_INVOKABLE void setStatusOverlayVisible(bool visible);
 
 signals:
     void xmlPathChanged();
@@ -203,6 +230,8 @@ signals:
     void busyWaitEnabledChanged();
     void leftUiVisibleChanged();
     void rightUiVisibleChanged();
+    void statusOverlayVisibleChanged();
+    void statusOverlayTextChanged();
     void modelTitleChanged();
 
     // 场景加载结果通知
@@ -265,7 +294,9 @@ private:
     std::atomic<bool> m_busyWaitEnabled {false};
     std::atomic<bool> m_leftUiVisible {true};
     std::atomic<bool> m_rightUiVisible {true};
+    std::atomic<bool> m_statusOverlayVisible {true};
 
+    QString           m_statusOverlayText;
     QString           m_modelTitle;
 
     std::mutex        m_pendingMtx;

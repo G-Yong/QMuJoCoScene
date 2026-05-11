@@ -131,3 +131,118 @@ mujocoViewItem->loadModel("new_model.xml");
 ## 模型库
 
 MuJoCo 官方提供了丰富的示例模型，可在 [MuJoCo 模型库](https://mujoco.readthedocs.io/en/stable/models.html) 中找到。
+
+---
+
+## 对 MuJoCo vendored 源码的补丁说明
+
+> 升级 `mujoco-*-windows-x86_64` 时，需将以下改动重新应用到新版本对应文件。
+
+### 背景
+
+中上方的 `PAUSE / LOADING...` 覆盖文字由官方 `simulate.cc::Simulate::Render()` 直接调用
+`mjr_overlay(mjFONT_BIG, mjGRID_TOP, ...)` 绘制进离屏 FBO，无法在封装层拦截。
+为此给 `Simulate` 添加了 `status_overlay` 开关与 `status_overlay_text` 只读缓冲，
+再通过 `MujocoQuickItem::statusOverlayVisible` / `statusOverlayText` 属性暴露给 QML。
+
+### 补丁（patch 格式，可直接 `git apply`）
+
+```diff
+diff --git a/mujoco-3.8.0-windows-x86_64/simulate/simulate.h b/mujoco-3.8.0-windows-x86_64/simulate/simulate.h
+--- a/mujoco-3.8.0-windows-x86_64/simulate/simulate.h
++++ b/mujoco-3.8.0-windows-x86_64/simulate/simulate.h
+@@ -192,6 +192,7 @@ class Simulate {
+   int profiler = 0;
+   int sensor = 0;
+   int pause_update = 0;
++  int status_overlay = 1;       // qt-mujoco patch: 0=hide centre overlay
+   int fullscreen = 0;
+   int vsync = 1;
+   int busywait = 0;
+@@ -223,6 +224,7 @@ class Simulate {
+ 
+   // strings
+   char load_error[kMaxFilenameLength] = "";
++  char status_overlay_text[30] = "";   // qt-mujoco patch: current overlay label
+   char dropfilename[kMaxFilenameLength] = "";
+   char filename[kMaxFilenameLength] = "";
+   char previous_filename[kMaxFilenameLength] = "";
+
+diff --git a/mujoco-3.8.0-windows-x86_64/simulate/simulate.cc b/mujoco-3.8.0-windows-x86_64/simulate/simulate.cc
+--- a/mujoco-3.8.0-windows-x86_64/simulate/simulate.cc
++++ b/mujoco-3.8.0-windows-x86_64/simulate/simulate.cc
+@@ -96,6 +96,20 @@ inline void Copy(T& dst, const T& src) {
+ 
+ const double zoom_increment = 0.02;  // ratio of one click-wheel zoom increment to vertical extent
+ 
++// qt-mujoco patch: compute current centre-overlay label and cache it in
++// sim->status_overlay_text so the Qt wrapper can read it without touching
++// the render path.
++void UpdateStatusOverlayText(mj::Simulate* sim) {
++  char label[30] = {'\0'};
++  if (sim->loadrequest) {
++    std::snprintf(label, sizeof(label), "LOADING...");
++  } else if (!sim->run) {
++    if (sim->scrub_index == 0) {
++      std::snprintf(label, sizeof(label), "PAUSE");
++    } else {
++      std::snprintf(label, sizeof(label), "PAUSE (%d)", sim->scrub_index);
++    }
++  }
++  mju::strcpy_arr(sim->status_overlay_text, label);
++}
++
+ // section ids
+ enum {
+   // left ui
+@@ -2617,6 +2631,7 @@ void Simulate::Render() {
+   if (this->profiler) {
+     smallrect.width = rect.width - rect.width/4;
+   }
++  UpdateStatusOverlayText(this);   // qt-mujoco patch
+ 
+   // no model
+   if (!this->is_passive_ && !this->m_) {
+@@ -2625,8 +2640,10 @@ void Simulate::Render() {
+ 
+     // label
+     if (this->loadrequest) {
+-      mjr_overlay(mjFONT_BIG, mjGRID_TOP, smallrect, "LOADING...", nullptr,
+-                  &this->platform_ui->mjr_context());
++      if (this->status_overlay) {                          // qt-mujoco patch
++        mjr_overlay(mjFONT_BIG, mjGRID_TOP, smallrect, this->status_overlay_text, nullptr,
++                    &this->platform_ui->mjr_context());
++      }
+     } else {
+       char intro_message[Simulate::kMaxFilenameLength];
+       mju::sprintf_arr(intro_message,
+@@ -2754,16 +2771,8 @@ void Simulate::Render() {
+   }
+ 
+   // show pause/loading label
+-  if (!this->run || this->loadrequest) {
+-    char label[30] = {'\0'};
+-    if (this->loadrequest) {
+-      std::snprintf(label, sizeof(label), "LOADING...");
+-    } else if (this->scrub_index == 0) {
+-      std::snprintf(label, sizeof(label), "PAUSE");
+-    } else {
+-      std::snprintf(label, sizeof(label), "PAUSE (%d)", this->scrub_index);
+-    }
+-    mjr_overlay(mjFONT_BIG, mjGRID_TOP, smallrect, label, nullptr,
++  if (this->status_overlay && this->status_overlay_text[0]) {   // qt-mujoco patch
++    mjr_overlay(mjFONT_BIG, mjGRID_TOP, smallrect, this->status_overlay_text, nullptr,
+                 &this->platform_ui->mjr_context());
+   }
+```
+
+### 升级步骤
+
+1. 将新版 `mujoco-X.Y.Z-windows-x86_64/` 目录放到本仓库同级目录，更新 `src/qt-mujoco.pri` 中的 `MUJOCO_DIR`。
+2. 在新版 `simulate/` 目录下执行：
+   ```bash
+   git apply --directory=mujoco-X.Y.Z-windows-x86_64 patches/status-overlay.patch
+   ```
+   若补丁因上下文偏移无法自动应用，对照上方注释（`// qt-mujoco patch`）手动合并，改动点共 **4 处**：
+   - `simulate.h`：在 `pause_update` 下方加 `status_overlay` 字段；在 `load_error` 下方加 `status_overlay_text` 字段。
+   - `simulate.cc`：在 `zoom_increment` 之后加 `UpdateStatusOverlayText()` 函数；在 `Render()` 开头调用它；将两处绘制 overlay 的代码改为受 `status_overlay` 开关控制。

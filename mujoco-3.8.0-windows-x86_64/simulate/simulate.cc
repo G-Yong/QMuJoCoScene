@@ -96,6 +96,20 @@ inline void Copy(T& dst, const T& src) {
 
 const double zoom_increment = 0.02;  // ratio of one click-wheel zoom increment to vertical extent
 
+void UpdateStatusOverlayText(mj::Simulate* sim) {
+  char label[30] = {'\0'};
+  if (sim->loadrequest) {
+    std::snprintf(label, sizeof(label), "LOADING...");
+  } else if (!sim->run) {
+    if (sim->scrub_index == 0) {
+      std::snprintf(label, sizeof(label), "PAUSE");
+    } else {
+      std::snprintf(label, sizeof(label), "PAUSE (%d)", sim->scrub_index);
+    }
+  }
+  mju::strcpy_arr(sim->status_overlay_text, label);
+}
+
 // section ids
 enum {
   // left ui
@@ -2617,6 +2631,7 @@ void Simulate::Render() {
   if (this->profiler) {
     smallrect.width = rect.width - rect.width/4;
   }
+  UpdateStatusOverlayText(this);
 
   // no model
   if (!this->is_passive_ && !this->m_) {
@@ -2625,8 +2640,10 @@ void Simulate::Render() {
 
     // label
     if (this->loadrequest) {
-      mjr_overlay(mjFONT_BIG, mjGRID_TOP, smallrect, "LOADING...", nullptr,
-                  &this->platform_ui->mjr_context());
+      if (this->status_overlay) {
+        mjr_overlay(mjFONT_BIG, mjGRID_TOP, smallrect, this->status_overlay_text, nullptr,
+                    &this->platform_ui->mjr_context());
+      }
     } else {
       char intro_message[Simulate::kMaxFilenameLength];
       mju::sprintf_arr(intro_message,
@@ -2754,16 +2771,8 @@ void Simulate::Render() {
   }
 
   // show pause/loading label
-  if (!this->run || this->loadrequest) {
-    char label[30] = {'\0'};
-    if (this->loadrequest) {
-      std::snprintf(label, sizeof(label), "LOADING...");
-    } else if (this->scrub_index == 0) {
-      std::snprintf(label, sizeof(label), "PAUSE");
-    } else {
-      std::snprintf(label, sizeof(label), "PAUSE (%d)", this->scrub_index);
-    }
-    mjr_overlay(mjFONT_BIG, mjGRID_TOP, smallrect, label, nullptr,
+  if (this->status_overlay && this->status_overlay_text[0]) {
+    mjr_overlay(mjFONT_BIG, mjGRID_TOP, smallrect, this->status_overlay_text, nullptr,
                 &this->platform_ui->mjr_context());
   }
 

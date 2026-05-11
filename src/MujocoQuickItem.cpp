@@ -364,6 +364,7 @@ void MujocoQuickItem::applyBooleanPropertiesTo(mujoco::Simulate& sim) {
     sim.busywait = boolToInt(m_busyWaitEnabled.load());
     sim.ui0_enable = boolToInt(m_leftUiVisible.load());
     sim.ui1_enable = boolToInt(m_rightUiVisible.load());
+    sim.status_overlay = boolToInt(m_statusOverlayVisible.load());
 
     const int fullscreen = boolToInt(m_fullscreenRequested.load());
     if (sim.fullscreen != fullscreen && sim.platform_ui) {
@@ -738,6 +739,8 @@ bool MujocoQuickItem::setLabelVisualization(int label) {
     return applied;
 }
 
+// 将标签模式循环切换到下一种（超过 mjNLABEL 后回绕到 0）。
+// 无需模型已加载，即使在加载前调用也会更新选项。
 bool MujocoQuickItem::cycleLabelVisualization() {
     bool applied = false;
     withSimulateLocked([&](mujoco::Simulate& sim) {
@@ -952,10 +955,23 @@ void MujocoQuickItem::setRightUiVisible(bool visible) {
     emit rightUiVisibleChanged();
 }
 
+void MujocoQuickItem::setStatusOverlayVisible(bool visible) {
+    if (m_statusOverlayVisible.exchange(visible) == visible) return;
+    withSimulateLocked([&](mujoco::Simulate& sim) { sim.status_overlay = boolToInt(visible); });
+    emit statusOverlayVisibleChanged();
+}
+
 // ----------------------------------------------------------------- IMujocoHost
 void MujocoQuickItem::onFrameRendered() {
     // 在 mujoco 渲染线程被调用，转发到 GUI 线程触发 update()
-    QMetaObject::invokeMethod(this, "update", Qt::QueuedConnection);
+    const QString statusText = m_sim ? QString::fromUtf8(m_sim->status_overlay_text) : QString();
+    QMetaObject::invokeMethod(this, [this, statusText] {
+        if (m_statusOverlayText != statusText) {
+            m_statusOverlayText = statusText;
+            emit statusOverlayTextChanged();
+        }
+        update();
+    }, Qt::QueuedConnection);
 }
 void MujocoQuickItem::onSetTitle(const QString& t) {
     // 注意：作为嵌入式 QQuickItem，不应擅自修改宿主窗口标题
