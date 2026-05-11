@@ -1,6 +1,7 @@
 HEADERS += \
     $$PWD/QtPlatformUIAdapter.h \
     $$PWD/MujocoQuickItem.h \
+    $$PWD/simulationjointinfo.h \
     $$PWD/lodepng.h
 
 SOURCES += \

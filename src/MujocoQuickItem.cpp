@@ -129,6 +129,7 @@ private:
 // ===========================================================================
 MujocoQuickItem::MujocoQuickItem(QQuickItem* parent)
     : QQuickFramebufferObject(parent) {
+    qRegisterMetaType<JointInfo>();
     setMirrorVertically(true); // mjr 是 OpenGL bottom-up，Quick 绘制时翻一下
     setAcceptedMouseButtons(Qt::AllButtons);
     setAcceptHoverEvents(true);
@@ -484,6 +485,106 @@ bool MujocoQuickItem::saveKeyframe() {
     withSimulateLocked([&](mujoco::Simulate& sim) {
         if (sim.is_passive_ || !sim.m_ || !sim.d_ || !isValidIndex(sim.key, sim.nkey_)) return;
         sim.pending_.save_key = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::saveSceneAsXml(const QString& filename) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_) return;
+        sim.pending_.save_xml = filename.toStdString();
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::saveSceneAsMjb(const QString& filename) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_) return;
+        sim.pending_.save_mjb = filename.toStdString();
+        applied = true;
+    });
+    return applied;
+}
+
+// ---------------------------------------------------------------------------
+// 关节查询与控制
+// ---------------------------------------------------------------------------
+
+static constexpr int kJntQposDim[] = {7, 4, 1, 1}; // free, ball, slide, hinge
+static const char* const kJntTypeName[] = {"free", "ball", "slide", "hinge"};
+
+int MujocoQuickItem::jointCount() const
+{
+    int count = 0;
+    withSimulation([&](const mjModel* m, mjData*) {
+        count = static_cast<int>(m->njnt);
+    });
+    return count;
+}
+
+JointInfo MujocoQuickItem::jointInfo(int index) const
+{
+    JointInfo result;
+    withSimulation([&](const mjModel* m, mjData*) {
+        if (!isValidIndex(index, static_cast<int>(m->njnt))) return;
+        int type = m->jnt_type[index];
+        const char* rawName = mj_id2name(m, mjOBJ_JOINT, index);
+        result.name      = rawName ? QString::fromUtf8(rawName)
+                                   : QStringLiteral("joint_%1").arg(index);
+        result.type      = type;
+        result.typeName  = QString::fromLatin1(kJntTypeName[type]);
+        result.qposDim   = kJntQposDim[type];
+        result.limited   = (m->jnt_limited[index] != 0);
+        result.rangeMin  = result.limited ? m->jnt_range[2 * index]     : 0.0;
+        result.rangeMax  = result.limited ? m->jnt_range[2 * index + 1] : 0.0;
+        result.stiffness = m->jnt_stiffness[index];
+        result.qposadr   = m->jnt_qposadr[index];
+    });
+    return result;
+}
+
+QVariantList MujocoQuickItem::jointPosition(int index) const
+{
+    QVariantList result;
+    withSimulation([&](const mjModel* m, mjData* d) {
+        if (!isValidIndex(index, static_cast<int>(m->njnt))) return;
+        int dim = kJntQposDim[m->jnt_type[index]];
+        int adr = m->jnt_qposadr[index];
+        for (int k = 0; k < dim; ++k)
+            result.append(d->qpos[adr + k]);
+    });
+    return result;
+}
+
+bool MujocoQuickItem::setJointPosition(int index, const QVariantList& values)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_) return;
+        if (!isValidIndex(index, static_cast<int>(sim.m_->njnt))) return;
+        int dim = kJntQposDim[sim.m_->jnt_type[index]];
+        if (values.size() != dim) return;
+        int adr = sim.m_->jnt_qposadr[index];
+        for (int k = 0; k < dim; ++k)
+            sim.qpos_[adr + k] = values[k].toDouble();
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setJointValue(int index, double value)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_) return;
+        if (!isValidIndex(index, static_cast<int>(sim.m_->njnt))) return;
+        int type = sim.m_->jnt_type[index];
+        if (type != mjJNT_SLIDE && type != mjJNT_HINGE) return;
+        sim.qpos_[sim.m_->jnt_qposadr[index]] = value;
         applied = true;
     });
     return applied;

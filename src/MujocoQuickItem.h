@@ -22,6 +22,7 @@
 #include <QQuickFramebufferObject>
 #include <QString>
 #include <QSize>
+#include <QVariant>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -33,6 +34,8 @@
 class QOpenGLContext;
 class QOffscreenSurface;
 class QTemporaryFile;
+
+#include "simulationjointinfo.h"
 
 namespace mujoco { class Simulate; }
 
@@ -75,6 +78,33 @@ public:
     Q_INVOKABLE void closeScene();
     // lastError: 最近一次加载失败的错误信息 (中文/英文均可，由底层提供)。
     Q_INVOKABLE QString lastError() const;
+    // saveModelAsXml: 将当前已编译的模型以 MJCF XML 格式写入 filename。
+    //   注意：外部资源（mesh/纹理）不嵌入，仅保留引用路径。
+    //   需要模型已加载；通过 pending 机制在渲染循环下一帧执行。
+    Q_INVOKABLE bool saveSceneAsXml(const QString& filename);
+    // saveSceneAsMjb: 将当前已编译的模型以 MuJoCo 二进制格式（.mjb）写入 filename。
+    //   完全自包含：内嵌所有 mesh/纹理数据，无需原始资源文件即可重新加载。
+    Q_INVOKABLE bool saveSceneAsMjb(const QString& filename);
+
+    // ------------------------------------------------------------------
+    // 关节查询与控制接口
+    // ------------------------------------------------------------------
+
+    // 返回当前场景的关节数量；场景未加载时返回 0。
+    Q_INVOKABLE int       jointCount() const;
+    // 返回第 index 个关节的固有属性；index 越界时返回默认构造的空结构。
+    Q_INVOKABLE JointInfo jointInfo(int index) const;
+    // 读取第 index 个关节的当前 qpos 值（列表长度 = qposDim）。
+    // hinge/slide 关节列表长度为 1，ball 为 4，free 为 7。
+    // 场景未加载或 index 越界时返回空列表。
+    Q_INVOKABLE QVariantList jointPosition(int index) const;
+    // 设置第 index 个关节的 qpos 值。values 长度须与 qposDim 匹配。
+    // 对 hinge/slide 关节可直接传 [angle] 或 [distance]。
+    // 返回 false 表示场景未加载、index 越界或 values 长度不匹配。
+    Q_INVOKABLE bool setJointPosition(int index, const QVariantList& values);
+    // 单自由度快捷接口，仅适用于 hinge / slide 关节。
+    // 对 free / ball 关节调用会返回 false。
+    Q_INVOKABLE bool setJointValue(int index, double value);
 
     Q_INVOKABLE bool toggleSimulationRunning();
     Q_INVOKABLE bool stepSimulationForward();
