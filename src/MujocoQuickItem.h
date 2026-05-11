@@ -49,6 +49,7 @@ class MujocoQuickItem : public QQuickFramebufferObject, public mjqt::IMujocoHost
     Q_PROPERTY(bool busyWaitEnabled READ busyWaitEnabled WRITE setBusyWaitEnabled NOTIFY busyWaitEnabledChanged)
     Q_PROPERTY(bool leftUiVisible READ leftUiVisible WRITE setLeftUiVisible NOTIFY leftUiVisibleChanged)
     Q_PROPERTY(bool rightUiVisible READ rightUiVisible WRITE setRightUiVisible NOTIFY rightUiVisibleChanged)
+    Q_PROPERTY(QString modelTitle READ modelTitle NOTIFY modelTitleChanged)
 public:
     explicit MujocoQuickItem(QQuickItem *parent = nullptr);
     ~MujocoQuickItem() override;
@@ -134,6 +135,7 @@ public:
     bool busyWaitEnabled() const { return m_busyWaitEnabled.load(); }
     bool leftUiVisible() const { return m_leftUiVisible.load(); }
     bool rightUiVisible() const { return m_rightUiVisible.load(); }
+    QString modelTitle() const { return m_modelTitle; }
 
     Q_INVOKABLE void setHelpVisible(bool visible);
     Q_INVOKABLE void setInfoVisible(bool visible);
@@ -159,6 +161,7 @@ signals:
     void busyWaitEnabledChanged();
     void leftUiVisibleChanged();
     void rightUiVisibleChanged();
+    void modelTitleChanged();
 
 protected:
     void mousePressEvent(QMouseEvent*) override;
@@ -211,6 +214,8 @@ private:
     std::atomic<bool> m_busyWaitEnabled {false};
     std::atomic<bool> m_leftUiVisible {true};
     std::atomic<bool> m_rightUiVisible {true};
+
+    QString           m_modelTitle;
 
     std::mutex        m_pendingMtx;
     QString           m_pendingFile;

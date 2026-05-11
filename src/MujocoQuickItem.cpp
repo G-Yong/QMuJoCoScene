@@ -769,8 +769,13 @@ void MujocoQuickItem::onFrameRendered() {
     QMetaObject::invokeMethod(this, "update", Qt::QueuedConnection);
 }
 void MujocoQuickItem::onSetTitle(const QString& t) {
+    // 注意：作为嵌入式 QQuickItem，不应擅自修改宿主窗口标题
+    // （否则会出现 QML Window 标题被改成 "MuJoCo : <model>" 的问题）。
+    // 仅通过信号把标题对外暴露，由上层 QML/C++ 自行决定如何使用。
     QMetaObject::invokeMethod(this, [this, t] {
-        if (window()) window()->setTitle(t);
+        if (m_modelTitle == t) return;
+        m_modelTitle = t;
+        emit modelTitleChanged();
     }, Qt::QueuedConnection);
 }
 void MujocoQuickItem::onToggleFullscreen() {
