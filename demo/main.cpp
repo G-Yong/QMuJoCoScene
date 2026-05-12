@@ -86,9 +86,8 @@ int main(int argc, char *argv[])
     //       context 共享，从而可以跨线程使用同一个 GL 纹理。
     QGuiApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
 
-    // MuJoCo 渲染要求 OpenGL 3.3 Core 或更高的兼容上下文
     QSurfaceFormat fmt;
-    fmt.setVersion(3, 3);
+    fmt.setVersion(4, 5);
     fmt.setProfile(QSurfaceFormat::CompatibilityProfile); // mjr_* 用了部分固定管线兼容调用
     fmt.setDepthBufferSize(24);
     fmt.setStencilBufferSize(8);
@@ -103,10 +102,12 @@ int main(int argc, char *argv[])
     view->setWindowTitle("MuJoCo in Qt Quick Demo");
     view->setResizeMode(QQuickWidget::SizeRootObjectToView);
     // 默认模型路径 —— 改成你自己的路径
+    QString filePath;
+    filePath = "../../../../mujoco-3.8.0-windows-x86_64/model/humanoid/humanoid.xml";
+    // filePath = "../../../../mujoco-3.8.0-windows-x86_64/model/cards/cards.xml";
     view->engine()->rootContext()->setContextProperty(
         "initialXmlPath",
-        QStringLiteral("../../../../"
-                       "mujoco-3.8.0-windows-x86_64/model/cards/cards.xml"));
+        filePath);
     view->setSource(QUrl("qrc:/main.qml"));
     view->show();
 

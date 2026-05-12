@@ -1214,6 +1214,10 @@ void MujocoQuickItem::renderThreadMain() {
         return;
     }
 
+    if (auto* f = m_ctx->extraFunctions()) {
+        f->glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
+    }
+
     static mjvCamera  cam;  mjv_defaultCamera(&cam);
     static mjvOption  opt;  mjv_defaultOption(&opt);
     static mjvPerturb pert; mjv_defaultPerturb(&pert);

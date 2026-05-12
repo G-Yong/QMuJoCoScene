@@ -161,7 +161,7 @@ void QtPlatformUIAdapter::SwapBuffers() {
             gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, sharedFbo);
             gl->glBlitFramebuffer(0, 0, con_.offWidth, con_.offHeight,
                                   0, 0, con_.offWidth, con_.offHeight,
-                                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
+                                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
             gl->glBindFramebuffer(GL_READ_FRAMEBUFFER, prevReadFbo);
             gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDrawFbo);
