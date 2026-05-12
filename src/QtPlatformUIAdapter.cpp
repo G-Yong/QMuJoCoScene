@@ -85,16 +85,6 @@ bool QtPlatformUIAdapter::ShouldCloseWindow() const { return m_shouldClose.load(
 // ---------------- 把 mjr 切到 OFFSCREEN 模式 ----------------
 bool QtPlatformUIAdapter::RefreshMjrContext(const mjModel* m, int fontscale) {
     int w = m_fbW.load(), h = m_fbH.load();
-    {
-        FILE* f = fopen("c:/Users/Administrator/Desktop/robotSim/qt-mujoco/demo/build/dbg.log","a");
-        if (f) {
-            fprintf(f, "RefreshMjrContext: m=%p fb=%dx%d before model.off=%dx%d\n",
-                    (void*)m, w, h,
-                    m ? m->vis.global.offwidth : -1,
-                    m ? m->vis.global.offheight : -1);
-            fclose(f);
-        }
-    }
     if (m && w > 0 && h > 0) {
         // mjModel 里 offwidth/offheight 是普通 int，可放心写入；这里只是把
         // 模型本身视为可变（simulate.cc 也在别处会修改 m->vis）。
@@ -104,14 +94,6 @@ bool QtPlatformUIAdapter::RefreshMjrContext(const mjModel* m, int fontscale) {
     }
 
     bool changed = mujoco::PlatformUIAdapter::RefreshMjrContext(m, fontscale);
-    {
-        FILE* f = fopen("c:/Users/Administrator/Desktop/robotSim/qt-mujoco/demo/build/dbg.log","a");
-        if (f) {
-            fprintf(f, "RefreshMjrContext: changed=%d con.off=%dx%d offColor_r=%u offFBO=%u offFBO_r=%u\n",
-                    int(changed), con_.offWidth, con_.offHeight, con_.offColor_r, con_.offFBO, con_.offFBO_r);
-            fclose(f);
-        }
-    }
     if (changed) {
         // mjr_makeContext 默认 currentBuffer=mjFB_WINDOW；切到 OFFSCREEN，
         // 让 simulate.cc 内的所有 mjr_render / mjr_overlay / mjui_render
