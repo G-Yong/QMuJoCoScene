@@ -14,7 +14,7 @@ win32-msvc* {
     QMAKE_CXXFLAGS += /utf-8
 }
 
-include(../src/qmojocosim.pri)
+include(../src/qmujocosim.pri)
 
 # ----------------------------------------------------------------------------
 # 源文件 / 资源
