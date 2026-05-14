@@ -135,6 +135,24 @@ int main(int argc, char *argv[])
         });
     }
 
+    QObject::connect(mujoco, &MujocoQuickItem::sceneLoaded, view, [=](const QString& source) {
+        // 绘制轨迹
+        auto tjId = mujoco->addTrajectory(1024,
+                              2.0,
+                              QVector4D(1.0f, 0.85f, 0.2f, 1.0f),
+                              true);
+        int bodyId = 0;
+        for (int i = 0; i < mujoco->objectCount(); ++i) {
+            auto info = mujoco->objectInfo(i);
+            qDebug() << "Body" << i << ":" << info.name;
+            if (info.name == "head") {
+                bodyId = i;
+                break;
+            }
+        }
+        mujoco->setTrajectoryTrackedBody(tjId, bodyId, 0);
+     });
+
     return app.exec();
 }
 
