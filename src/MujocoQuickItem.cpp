@@ -909,9 +909,15 @@ void MujocoQuickItem::sampleTrackedTrajectoriesLocked(const mjModel* m, const mj
             have = true;
         }
         if (!have) continue;
-        if (!t.points.empty() && t.minDistance > 0.0) {
+        // 即使 minDistance==0 也过滤掉与上一个采样点完全相同的点：
+        // 否则在仿真暂停 / 物体静止时，每帧都会 push 一个重复点并触发
+        // rebuildTrajectoryGeomsLocked()，引起不必要的 user_scn 重建，
+        // 与 Qt Quick / mujoco 渲染线程的帧节拍互相挤压导致掉到 ~30fps。
+        if (!t.points.empty()) {
             const QVector3D& last = t.points.back();
-            if ((p - last).length() < float(t.minDistance)) continue;
+            const float dist = (p - last).length();
+            const float minDist = std::max(float(t.minDistance), 1e-6f);
+            if (dist < minDist) continue;
         }
         t.points.push_back(p);
         while (static_cast<int>(t.points.size()) > t.maxPoints) t.points.pop_front();
