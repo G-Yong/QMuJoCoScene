@@ -192,9 +192,18 @@ public:
                                               double minDistance = 0.0);
     // 自动跟踪：按 site 名采样其世界坐标（site_xpos）；适合直接绑定 TCP。
     // siteName 为空表示关闭跟踪。
+    // site是body的附属物，通常用来标记末端执行器位置，例如 xml 中 link6 下的 tcp site：
+    // <body name="link6" ...>
+    //     ...
+    //     <site name="tcp" pos="0 0 0.15" size="0.01" rgba="1 0 0 1"/>
+    // </body>
     Q_INVOKABLE bool setTrajectoryTrackedSite(int trajectoryId,
                                               const QString& siteName,
                                               double minDistance = 0.0);
+    // 返回当前模型里所有 site 的名字（按 site id 顺序）。site 与 body 的命名空间
+    // 是分开的，objectInfo() 列出的 link1..link6 等是 body 名，不一定存在同名 site。
+    // 用于配合 setTrajectoryTrackedSite 排查 / 选择 TCP。场景未加载时返回空列表。
+    Q_INVOKABLE QStringList siteNames() const;
 
     // 向 XML 场景追加静态碰撞障碍物并重编译模型。语义对应 MJCF worldbody/geom：
     // mass=0、无 joint、contype/conaffinity 默认均为 1，可参与碰撞但不会被动力学推动。

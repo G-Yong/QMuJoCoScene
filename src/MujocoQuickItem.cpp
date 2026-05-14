@@ -1123,6 +1123,20 @@ bool MujocoQuickItem::setTrajectoryTrackedSite(int trajectoryId,
     return ok;
 }
 
+QStringList MujocoQuickItem::siteNames() const {
+    QStringList names;
+    if (!m_sim) return names;
+    std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+    const mjModel* m = m_sim->m_;
+    if (!m) return names;
+    names.reserve(m->nsite);
+    for (int i = 0; i < m->nsite; ++i) {
+        const char* n = mj_id2name(m, mjOBJ_SITE, i);
+        names.append(n ? QString::fromUtf8(n) : QString());
+    }
+    return names;
+}
+
 int MujocoQuickItem::addStaticObstacle(PrimitiveType type,
                                        const QVector3D& position,
                                        const QVector3D& size,
