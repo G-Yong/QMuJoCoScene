@@ -545,19 +545,19 @@ bool MujocoQuickItem::addPrimitive(PrimitiveType type,
     return !bodyIds.isEmpty();
 }
 
-QVariantList MujocoQuickItem::addPrimitives(const QVariantList& positions,
-                                            const QVariantList& types,
+QVariantList MujocoQuickItem::addPrimitives(const QVariantList& types,
+                                            const QVariantList& positions,
                                             const QVariantList& sizes,
                                             double mass,
                                             bool freeJoint,
                                             const QString& namePrefix)
 {
-    return addPrimitiveRequests(positions, types, sizes,
+    return addPrimitiveRequests(types, positions, sizes,
                                 mass, freeJoint, namePrefix, false);
 }
 
-QVariantList MujocoQuickItem::addPrimitiveRequests(const QVariantList& positions,
-                                                   const QVariantList& types,
+QVariantList MujocoQuickItem::addPrimitiveRequests(const QVariantList& types,
+                                                   const QVariantList& positions,
                                                    const QVariantList& sizes,
                                                    double mass,
                                                    bool freeJoint,
@@ -567,7 +567,7 @@ QVariantList MujocoQuickItem::addPrimitiveRequests(const QVariantList& positions
     std::vector<PrimitiveRequest> requests;
     QString error;
     const QString effectivePrefix = namePrefix.trimmed().isEmpty() ? QStringLiteral("primitive") : namePrefix.trimmed();
-    if (!buildPrimitiveRequests(positions, types, sizes, QVariantList(),
+    if (!buildPrimitiveRequests(types, positions, sizes, QVariantList(),
                                 QVector4D(0.2f, 0.6f, 0.9f, 1.0f),
                                 effectivePrefix, &requests, &error)) {
         setLastError(error);
@@ -748,13 +748,13 @@ int MujocoQuickItem::addVisualPrimitive(PrimitiveType type,
     return addedIndex;
 }
 
-QVariantList MujocoQuickItem::addVisualPrimitives(const QVariantList& positions,
-                                                  const QVariantList& types,
+QVariantList MujocoQuickItem::addVisualPrimitives(const QVariantList& types,
+                                                  const QVariantList& positions,
                                                   const QVariantList& sizes,
                                                   const QVariantList& rgba) {
     std::vector<PrimitiveRequest> requests;
     QString error;
-    if (!buildPrimitiveRequests(positions, types, sizes, rgba,
+    if (!buildPrimitiveRequests(types, positions, sizes, rgba,
                                 QVector4D(0.2f, 0.6f, 0.9f, 1.0f),
                                 QString(), &requests, &error)) {
         setLastError(error);
@@ -1165,31 +1165,31 @@ int MujocoQuickItem::addStaticObstacle(PrimitiveType type,
     return bodyIds.isEmpty() ? -1 : bodyIds.first().toInt();
 }
 
-QVariantList MujocoQuickItem::addStaticObstacles(const QVariantList& positions,
-                                                 const QVariantList& types,
+QVariantList MujocoQuickItem::addStaticObstacles(const QVariantList& types,
+                                                 const QVariantList& positions,
                                                  const QVariantList& sizes,
                                                  const QVariantList& rgba,
                                                  int contype,
                                                  int conaffinity,
                                                  const QString& namePrefix)
 {
-    return addStaticObstacleRequests(positions, types, sizes, rgba,
+    return addStaticObstacleRequests(types, positions, sizes, rgba,
                                      contype, conaffinity, namePrefix, false);
 }
 
-QVariantList MujocoQuickItem::addStaticObstacleRequests(const QVariantList& positions,
-                                                       const QVariantList& types,
-                                                       const QVariantList& sizes,
-                                                       const QVariantList& rgba,
-                                                       int contype,
-                                                       int conaffinity,
-                                                       const QString& namePrefix,
-                                                       bool useExactSingleName)
+QVariantList MujocoQuickItem::addStaticObstacleRequests(const QVariantList& types,
+                                                        const QVariantList& positions,
+                                                        const QVariantList& sizes,
+                                                        const QVariantList& rgba,
+                                                        int contype,
+                                                        int conaffinity,
+                                                        const QString& namePrefix,
+                                                        bool useExactSingleName)
 {
     std::vector<PrimitiveRequest> requests;
     QString error;
     const QString effectivePrefix = namePrefix.trimmed().isEmpty() ? QStringLiteral("obstacle") : namePrefix.trimmed();
-    if (!buildPrimitiveRequests(positions, types, sizes, rgba,
+    if (!buildPrimitiveRequests(types, positions, sizes, rgba,
                                 QVector4D(0.9f, 0.25f, 0.15f, 0.8f),
                                 effectivePrefix, &requests, &error)) {
         setLastError(error);

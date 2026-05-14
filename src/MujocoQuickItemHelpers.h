@@ -235,8 +235,8 @@ struct PrimitiveRequest {
     QString name;
 };
 
-inline bool buildPrimitiveRequests(const QVariantList& positions,
-                                   const QVariantList& types,
+inline bool buildPrimitiveRequests(const QVariantList& types,
+                                   const QVariantList& positions,
                                    const QVariantList& sizes,
                                    const QVariantList& colors,
                                    const QVector4D& defaultColor,

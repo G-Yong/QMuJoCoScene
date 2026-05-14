@@ -137,8 +137,8 @@ public:
                                   bool freeJoint = true,
                                   const QString& name = QString());
     // 批量追加基础物体，只重编译一次；返回新增 bodyId 列表。
-    Q_INVOKABLE QVariantList addPrimitives(const QVariantList& positions,
-                                           const QVariantList& types,
+    Q_INVOKABLE QVariantList addPrimitives(const QVariantList& types,
+                                           const QVariantList& positions,
                                            const QVariantList& sizes,
                                            double mass = 1.0,
                                            bool freeJoint = true,
@@ -153,14 +153,39 @@ public:
                                        const QVector4D& rgba = QVector4D(0.2f, 0.6f, 0.9f, 1.0f));
     // 批量追加可视化 geom；types 支持 PrimitiveType 枚举值，positions/sizes/rgba 支持 QVector3D/QVector4D 或数字列表。
     // 返回每个新增 geom 的 user_scn 下标；任一输入非法时返回空列表且不修改场景。
-    Q_INVOKABLE QVariantList addVisualPrimitives(const QVariantList& positions,
-                                                 const QVariantList& types,
+    Q_INVOKABLE QVariantList addVisualPrimitives(const QVariantList& types,
+                                                 const QVariantList& positions,
                                                  const QVariantList& sizes,
                                                  const QVariantList& rgba = QVariantList());
     Q_INVOKABLE int visualPrimitiveCount() const;
     Q_INVOKABLE bool setVisualPrimitivePosition(int index, const QVector3D& position);
     Q_INVOKABLE bool setVisualPrimitiveSize(int index, const QVector3D& size);
     Q_INVOKABLE void clearVisualPrimitives();
+
+    // 向 XML 场景追加静态碰撞障碍物并重编译模型。语义对应 MJCF worldbody/geom：
+    // <worldbody>
+    //   <geom name="obstacle1" type="box" pos="0 0 0.5"
+    //         size="0.1 0.1 0.1"
+    //         rgba="0.9 0.25 0.15 0.8"
+    //         contype="1" conaffinity="1"/>
+    // </worldbody>
+    // mass=0、无 joint、contype/conaffinity 默认均为 1，可参与碰撞但不会被动力学推动。
+    // 返回新增 bodyId；失败返回 -1。.mjb 场景没有可编辑 mjSpec，会返回 -1。
+    Q_INVOKABLE int addStaticObstacle(PrimitiveType type,
+                                      const QVector3D& position = QVector3D(0.0f, 0.0f, 0.5f),
+                                      const QVector3D& size = QVector3D(0.1f, 0.1f, 0.1f),
+                                      const QVector4D& rgba = QVector4D(0.9f, 0.25f, 0.15f, 0.8f),
+                                      int contype = 1, // 位掩码，默认 1，表示与默认碰撞组发生碰撞；设置为 0 则不与任何物体发生碰撞。（允许我去碰别人）
+                                      int conaffinity = 1,// 位掩码，默认 1，表示属于默认碰撞组；仅当其他物体的 contype 与该值的按位与非零时才发生碰撞。（允许别人来碰我）
+                                      const QString& name = QString());
+    // 批量追加静态障碍物，只重编译一次；返回新增 bodyId 列表。
+    Q_INVOKABLE QVariantList addStaticObstacles(const QVariantList& types,
+                                                const QVariantList& positions,
+                                                const QVariantList& sizes,
+                                                const QVariantList& rgba = QVariantList(),
+                                                int contype = 1,
+                                                int conaffinity = 1,
+                                                const QString& namePrefix = QString());
 
     // ------------------------------------------------------------------
     // 轨迹（尾迹）可视化接口
@@ -211,31 +236,6 @@ public:
     // 是分开的，objectInfo() 列出的 link1..link6 等是 body 名，不一定存在同名 site。
     // 用于配合 setTrajectoryTrackedSite 排查 / 选择 TCP。场景未加载时返回空列表。
     Q_INVOKABLE QStringList siteNames() const;
-
-    // 向 XML 场景追加静态碰撞障碍物并重编译模型。语义对应 MJCF worldbody/geom：
-    // <worldbody>
-    //   <geom name="obstacle1" type="box" pos="0 0 0.5"
-    //         size="0.1 0.1 0.1"
-    //         rgba="0.9 0.25 0.15 0.8"
-    //         contype="1" conaffinity="1"/>
-    // </worldbody>
-    // mass=0、无 joint、contype/conaffinity 默认均为 1，可参与碰撞但不会被动力学推动。
-    // 返回新增 bodyId；失败返回 -1。.mjb 场景没有可编辑 mjSpec，会返回 -1。
-    Q_INVOKABLE int addStaticObstacle(PrimitiveType type,
-                                      const QVector3D& position = QVector3D(0.0f, 0.0f, 0.5f),
-                                      const QVector3D& size = QVector3D(0.1f, 0.1f, 0.1f),
-                                      const QVector4D& rgba = QVector4D(0.9f, 0.25f, 0.15f, 0.8f),
-                                      int contype = 1, // 位掩码，默认 1，表示与默认碰撞组发生碰撞；设置为 0 则不与任何物体发生碰撞。（允许我去碰别人）
-                                      int conaffinity = 1,// 位掩码，默认 1，表示属于默认碰撞组；仅当其他物体的 contype 与该值的按位与非零时才发生碰撞。（允许别人来碰我）
-                                      const QString& name = QString());
-    // 批量追加静态障碍物，只重编译一次；返回新增 bodyId 列表。
-    Q_INVOKABLE QVariantList addStaticObstacles(const QVariantList& positions,
-                                                const QVariantList& types,
-                                                const QVariantList& sizes,
-                                                const QVariantList& rgba = QVariantList(),
-                                                int contype = 1,
-                                                int conaffinity = 1,
-                                                const QString& namePrefix = QString());
 
     // ------------------------------------------------------------------
     // 场景物体查询与编辑接口
@@ -449,15 +449,15 @@ private:
     // 设置最近一次错误信息 (线程安全)。
     void setLastError(const QString& err);
     bool ensureUserSceneLocked(mujoco::Simulate& sim);
-    QVariantList addPrimitiveRequests(const QVariantList& positions,
-                                      const QVariantList& types,
+    QVariantList addPrimitiveRequests(const QVariantList& types,
+                                      const QVariantList& positions,
                                       const QVariantList& sizes,
                                       double mass,
                                       bool freeJoint,
                                       const QString& namePrefix,
                                       bool useExactSingleName);
-    QVariantList addStaticObstacleRequests(const QVariantList& positions,
-                                           const QVariantList& types,
+    QVariantList addStaticObstacleRequests(const QVariantList& types,
+                                           const QVariantList& positions,
                                            const QVariantList& sizes,
                                            const QVariantList& rgba,
                                            int contype,
