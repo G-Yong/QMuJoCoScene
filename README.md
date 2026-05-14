@@ -15,7 +15,7 @@
 - **三线程架构**：渲染线程、物理仿真线程、Qt 主线程各司其职，互不阻塞。
 - **拖拽加载模型**：直接将 `.xml` / `.mjb` 文件拖入窗口即可热切换模型。
 - **独立 GPU 优先**：导出 `NvOptimusEnablement` / `AmdPowerXpressRequestHighPerformance` 符号，在双显卡笔记本上自动选用独立 GPU。
-- **物体运动轨迹可视化**：在 `MujocoQuickItem` 中添加了 [`addTrajectory`](https://github.com/G-Yong/QMuJoCoSim/blob/master/src/MujocoQuickItem.h#L171) 以及 [`setTrajectoryTrackedSite`](https://github.com/G-Yong/QMuJoCoSim/blob/master/src/MujocoQuickItem.h#L200) 等接口，允许用户在 QML 端创建和管理轨迹对象，实时可视化指定物体的运动轨迹。
+- **物体运动轨迹可视化**：在 `MujocoQuickItem` 中添加了 [`addTrajectory`](https://github.com/G-Yong/QMuJoCoSim/blob/master/src/MujocoQuickItem.h#L171) 以及 [`setTrajectoryTrackedSite`](https://github.com/G-Yong/QMuJoCoSim/blob/master/src/MujocoQuickItem.h#L200) 等接口，允许用户在 QML 端创建和管理轨迹对象，实时可视化指定物体的运动轨迹（动态刷新）。
 
 ## 架构
 
