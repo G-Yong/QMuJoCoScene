@@ -127,7 +127,7 @@ int main(int argc, char *argv[])
     label->move(10, 10);
     label->show();
 
-    // contactsChanged 每帧发出，直接驱动标签刷新，无需轮询定时器。
+    // contactsChanged 仅在接触快照实际变化时发出，直接驱动标签刷新。
     if (mujoco) {
         QObject::connect(mujoco, &MujocoQuickItem::contactsChanged, view, [label, mujoco]() {
             label->setText(collisionSummary(mujoco));

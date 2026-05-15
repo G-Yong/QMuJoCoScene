@@ -76,7 +76,7 @@ class MUJOCOQUICKITEM_EXPORT MujocoQuickItem : public QQuickFramebufferObject, p
     Q_PROPERTY(bool statusOverlayVisible READ statusOverlayVisible WRITE setStatusOverlayVisible NOTIFY statusOverlayVisibleChanged)
     Q_PROPERTY(QString statusOverlayText READ statusOverlayText NOTIFY statusOverlayTextChanged)
     Q_PROPERTY(QString modelTitle READ modelTitle NOTIFY modelTitleChanged)
-    Q_PROPERTY(int contactCount READ contactCount NOTIFY contactsChanged)
+    Q_PROPERTY(QVariantList contacts READ contacts NOTIFY contactsChanged)
 public:
     enum PrimitiveType {
         PrimitiveBox = 0,
@@ -337,7 +337,7 @@ public:
     // 碰撞检测查询接口
     // ------------------------------------------------------------------
 
-    // 返回当前帧快照中的接触数量。每帧在渲染回调中自动更新，线程安全。
+    // 返回当前接触快照中的接触数量。
     int contactCount() const;
     // 返回快照中第 index 个接触的详细信息；越界时返回默认构造值。
     Q_INVOKABLE ContactInfo  contact(int index) const;
@@ -410,7 +410,7 @@ signals:
     void statusOverlayVisibleChanged();
     void statusOverlayTextChanged();
     void modelTitleChanged();
-    // 每帧在渲染回调后发出，携带最新接触快照（即使接触数量未变也会发出）。
+    // 当前接触快照发生实际变动时发出。
     void contactsChanged();
 
     // 场景加载结果通知
@@ -506,7 +506,7 @@ private:
     // loadSceneFromData 写入的临时文件，需保持存活直到下次加载或关闭。
     std::unique_ptr<QTemporaryFile> m_tempSceneFile;
 
-    // 接触快照：由 onFrameRendered() 在主线程更新，contactCount()/contact() 读取。
+    // 接触快照：由 onFrameRendered() 在主线程按需更新，contactCount()/contact()/contacts() 读取。
     // 仅在主线程访问，无需额外锁。
     QList<ContactInfo> m_contactSnapshot;
 

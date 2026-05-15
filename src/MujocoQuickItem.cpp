@@ -1509,6 +1509,33 @@ static QList<ContactInfo> buildContactSnapshot(mjModel* m, mjData* d)
     return result;
 }
 
+static bool sameContactInfo(const ContactInfo& lhs, const ContactInfo& rhs)
+{
+    return lhs.geom0Id == rhs.geom0Id
+        && lhs.geom1Id == rhs.geom1Id
+        && lhs.body0Id == rhs.body0Id
+        && lhs.body1Id == rhs.body1Id
+        && lhs.geom0Name == rhs.geom0Name
+        && lhs.geom1Name == rhs.geom1Name
+        && lhs.body0Name == rhs.body0Name
+        && lhs.body1Name == rhs.body1Name
+        && lhs.dist == rhs.dist
+        && lhs.active == rhs.active
+        && lhs.penetrating == rhs.penetrating
+        && lhs.normalForce == rhs.normalForce
+        && lhs.position == rhs.position
+        && lhs.normal == rhs.normal;
+}
+
+static bool sameContactSnapshot(const QList<ContactInfo>& lhs, const QList<ContactInfo>& rhs)
+{
+    if (lhs.size() != rhs.size()) return false;
+    for (int i = 0; i < lhs.size(); ++i) {
+        if (!sameContactInfo(lhs.at(i), rhs.at(i))) return false;
+    }
+    return true;
+}
+
 int MujocoQuickItem::jointCount() const
 {
     int count = 0;
@@ -1996,8 +2023,10 @@ void MujocoQuickItem::onFrameRendered() {
             m_statusOverlayText = statusText;
             emit statusOverlayTextChanged();
         }
-        m_contactSnapshot = std::move(contacts);
-        emit contactsChanged();
+        if (!sameContactSnapshot(m_contactSnapshot, contacts)) {
+            m_contactSnapshot = std::move(contacts);
+            emit contactsChanged();
+        }
         update();
     }, Qt::QueuedConnection);
 }
