@@ -1,6 +1,6 @@
 # QMuJoCoSim
 
-[English](README.md)
+[English](README.md) | **中文**
 
 ![snapshot](assets/QMuJoCoSim.png)
 
