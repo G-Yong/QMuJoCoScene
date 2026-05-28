@@ -1,77 +1,79 @@
 # QMuJoCoSim
 
+[中文](README.zh-CN.md)
+
 ![snapshot](assets/QMuJoCoSim.png)
 
-将 [MuJoCo](https://github.com/google-deepmind/mujoco) 官方 [`Simulate`](https://github.com/google-deepmind/mujoco/tree/main/simulate) 查看器以 QML 组件的形式嵌入 Qt Quick 应用的集成库。无需 GLFW，直接在 QML 场景中运行完整的 MuJoCo 物理仿真与交互式 3D 渲染。
+A library that embeds the official [MuJoCo](https://github.com/google-deepmind/mujoco) [`Simulate`](https://github.com/google-deepmind/mujoco/tree/main/simulate) viewer as a QML component inside a Qt Quick application. No GLFW required — full MuJoCo physics simulation and interactive 3D rendering run directly within the QML scene.
 
-## 效果
+## Preview
 
 ![snapshot](assets/snapshot.png)
 
-## 特性
+## Features
 
-- **零 GLFW 依赖**：用 `QtPlatformUIAdapter` 替换官方 `GlfwAdapter`，所有 OpenGL 上下文、事件均由 Qt 管理。
-- **QML 原生组件**：`MujocoView` 继承 `QQuickFramebufferObject`，可与任意 QML 布局、锚点、动画无缝组合。
-- **跨上下文共享纹理**：MuJoCo 渲染线程持有私有 `QOffscreenSurface` + `QOpenGLContext`；渲染结果通过 `Qt::AA_ShareOpenGLContexts` 共享的 GL 纹理传递给 Qt Quick scenegraph，无像素级 CPU 回读。
-- **帧节拍同步**：MuJoCo 渲染线程严格等待 Qt Quick scenegraph 取走上一帧后再进入下一次 `mjr_render`，避免以 GPU 极限速率生成被丢弃的帧，大窗口下交互保持流畅。
-- **三线程架构**：渲染线程、物理仿真线程、Qt 主线程各司其职，互不阻塞。
-- **拖拽加载模型**：直接将 `.xml` / `.mjb` 文件拖入窗口即可热切换模型。
-- **独立 GPU 优先**：导出 `NvOptimusEnablement` / `AmdPowerXpressRequestHighPerformance` 符号，在双显卡笔记本上自动选用独立 GPU。
-- **物体运动轨迹可视化**：在 `MujocoQuickItem` 中添加了 [`addTrajectory`](https://github.com/G-Yong/QMuJoCoSim/blob/master/src/MujocoQuickItem.h#L171) 以及 [`setTrajectoryTrackedSite`](https://github.com/G-Yong/QMuJoCoSim/blob/master/src/MujocoQuickItem.h#L200) 等接口，允许用户在 QML 端创建和管理轨迹对象，实时可视化指定物体的运动轨迹（动态刷新）。
+- **Zero GLFW dependency**: `QtPlatformUIAdapter` replaces the official `GlfwAdapter`; all OpenGL context management and event handling are driven by Qt.
+- **Native QML component**: `MujocoView` inherits `QQuickFramebufferObject` and composes seamlessly with any QML layout, anchors, or animations.
+- **Cross-context shared texture**: The MuJoCo render thread owns a private `QOffscreenSurface` + `QOpenGLContext`. The rendered frame is delivered to the Qt Quick scene graph as a shared GL texture via `Qt::AA_ShareOpenGLContexts` — no CPU pixel readback.
+- **Frame-paced synchronisation**: The MuJoCo render thread waits for the Qt Quick scene graph to consume each frame before entering the next `mjr_render`, preventing GPU-speed frame generation that would otherwise be discarded and keeping interaction smooth on large windows.
+- **Three-thread architecture**: The render thread, physics simulation thread, and Qt main thread each have a dedicated role and never block one another.
+- **Drag-and-drop model loading**: Drop a `.xml` or `.mjb` file directly onto the window to hot-swap the model.
+- **Discrete GPU preference**: Exports `NvOptimusEnablement` / `AmdPowerXpressRequestHighPerformance` symbols so the driver automatically selects the discrete GPU on dual-GPU laptops.
+- **Object trajectory visualisation**: [`addTrajectory`](https://github.com/G-Yong/QMuJoCoSim/blob/master/src/MujocoQuickItem.h#L171) and [`setTrajectoryTrackedSite`](https://github.com/G-Yong/QMuJoCoSim/blob/master/src/MujocoQuickItem.h#L200) APIs let users create and manage trajectory objects from QML, providing real-time visualisation of body motion paths (dynamically updated each frame).
 
-## 架构
+## Architecture
 
 ```
-Qt 主线程
-└── MujocoView (QQuickFramebufferObject / QML 组件)
-        │  鼠标 / 键盘 / 滚轮事件 → PostXxx() → 事件队列
+Qt Main Thread
+└── MujocoView (QQuickFramebufferObject / QML component)
+        │  Mouse / Keyboard / Wheel events → PostXxx() → event queue
         │
-        ├── 渲染线程  (QOffscreenSurface + 私有 QOpenGLContext)
+        ├── Render Thread  (QOffscreenSurface + private QOpenGLContext)
         │       └── mujoco::Simulate::RenderLoop()
         │               └── mjr_render → con_.offFBO (multisample)
-        │               └── SwapBuffers: blit → 共享 GL 纹理 → glFlush
-        │               └── 等待 scenegraph 消费信号（帧节拍）
+        │               └── SwapBuffers: blit → shared GL texture → glFlush
+        │               └── Wait for scene graph consume signal (frame pace)
         │
-        ├── 物理线程
-        │       └── mj_step / mj_forward 循环
+        ├── Physics Thread
+        │       └── mj_step / mj_forward loop
         │
-        └── Qt Quick scenegraph 渲染线程
+        └── Qt Quick Scene Graph Render Thread
                 └── MujocoFboRenderer::render()
-                        └── 将共享纹理 blit 到 Quick FBO → 发出消费信号
+                        └── Blit shared texture into Quick FBO → emit consume signal
 ```
 
-| 类 | 职责 |
+| Class | Responsibility |
 |---|---|
-| `MujocoQuickItem` | QML 可用的 `QQuickFramebufferObject`，管理生命周期、输入事件转发 |
-| `MujocoFboRenderer` | scenegraph 渲染线程端：把共享纹理 blit 到 Quick 提供的 FBO |
-| `QtPlatformUIAdapter` | 实现 `mujoco::PlatformUIAdapter`：offscreen FBO 管理、共享纹理创建、帧节拍 CV、事件队列 |
+| `MujocoQuickItem` | `QQuickFramebufferObject` exposed to QML; manages lifecycle and input-event forwarding |
+| `MujocoFboRenderer` | Scene-graph-thread side: blits the shared texture into the FBO provided by Qt Quick |
+| `QtPlatformUIAdapter` | Implements `mujoco::PlatformUIAdapter`: offscreen FBO management, shared texture creation, frame-pace condition variable, event queue |
 
-`MujocoQuickItem.h` 是可交付给外部客户的公共头文件。它只包含 Qt / C++ 标准库头和 `simulationtypes.h`，不包含 MuJoCo 或 `simulate` 目录下的头文件；需要 `mjModel` / `mjData` 的高级回调接口仅在头文件中前向声明类型。真正依赖 MuJoCo 的 `QtPlatformUIAdapter.h`、`simulate.h`、`mujoco.h` 只在实现文件或内部适配器头中使用。
+`MujocoQuickItem.h` is the public header intended for external consumers. It only includes Qt / C++ standard library headers and `simulationtypes.h`; it never includes MuJoCo or `simulate` headers. Advanced callback interfaces that require `mjModel` / `mjData` use only forward-declared types in the header. `QtPlatformUIAdapter.h`, `simulate.h`, and `mujoco.h` are confined to implementation files or internal adapter headers.
 
-在 `RobotSimulator` 动态库中集成时，构建系统通过 `MUJOCOQUICKITEM_EXPORT=Q_DECL_EXPORT` 导出 `MujocoQuickItem`。交付头 `simulationview.h` 会在包含 `MujocoQuickItem.h` 前将 `MUJOCOQUICKITEM_EXPORT` 映射为 `ROBOTSIMULATOR_EXPORT`，因此客户仍可使用兼容的 `RobotSim::SimulationView` 类型名；该类型名现在是 `MujocoQuickItem` 的别名，不再维护一层重复转发封装。
+When integrated into the `RobotSimulator` shared library, the build system exports `MujocoQuickItem` via `MUJOCOQUICKITEM_EXPORT=Q_DECL_EXPORT`. The delivery header `simulationview.h` remaps `MUJOCOQUICKITEM_EXPORT` to `ROBOTSIMULATOR_EXPORT` before including `MujocoQuickItem.h`, so consumers can continue using the compatible `RobotSim::SimulationView` type name — which is now a plain alias for `MujocoQuickItem` with no forwarding wrapper.
 
-### 关键设计说明
+### Key Design Decisions
 
-| 问题 | 解决方案 |
+| Problem | Solution |
 |---|---|
-| `con_.offColor_r` 是 renderbuffer，不能跨 context 共享也不能作为纹理采样 | 适配器自行创建 `GL_TEXTURE_2D` + 配套 FBO，在 `SwapBuffers` 里把 multisample offFBO blit 解析到该纹理 |
-| `QOpenGLContext` / `QOffscreenSurface` 在渲染线程结束后线程亲和性失效 | 渲染线程退出前调用 `moveToThread(nullptr)` 交出所有权，主线程 `stop()` 再 `moveToThread(currentThread())` 后删除 |
-| 大窗口下旋转 / 移动场景卡顿 | `condition_variable` 帧节拍：每帧渲染后等待 scenegraph 消费，使 mjr 循环速率自动与显示器刷新率对齐 |
+| `con_.offColor_r` is a renderbuffer — it cannot be shared across contexts or sampled as a texture | The adapter creates its own `GL_TEXTURE_2D` + companion FBO; during `SwapBuffers` the multisample offFBO is resolved (blit) into that texture |
+| `QOpenGLContext` / `QOffscreenSurface` lose thread affinity when the render thread exits | The render thread calls `moveToThread(nullptr)` before exiting; the main thread's `stop()` calls `moveToThread(currentThread())` and then deletes the objects |
+| Rotation / panning stutter on large windows | A `condition_variable` frame pace ties the `mjr` loop rate to the monitor refresh rate |
 
-## 依赖
+## Dependencies
 
-| 组件 | 版本 |
+| Component | Version |
 |---|---|
-| Qt | 5.15.2（需含 `quick`、`opengl` 模块）|
+| Qt | 5.15.2 (requires `quick` and `opengl` modules) |
 | MuJoCo | 3.8.0 Windows x86_64 |
-| 编译器 | MSVC 2019 64-bit（`/utf-8`）|
+| Compiler | MSVC 2019 64-bit (`/utf-8`) |
 | OpenGL | 3.3 Compatibility Profile |
 
-## 快速开始
+## Quick Start
 
-**1. 克隆并配置路径**
+**1. Clone and set the model path**
 
-在 `demo/main.cpp` 中将 `initialXmlPath` 改为你自己的模型路径：
+In `demo/main.cpp`, change `initialXmlPath` to point to your own model:
 
 ```cpp
 engine.rootContext()->setContextProperty(
@@ -79,15 +81,15 @@ engine.rootContext()->setContextProperty(
     QStringLiteral("path/to/your/model.xml"));
 ```
 
-**2. 用 Qt Creator 打开**
+**2. Open in Qt Creator**
 
-打开 `demo/demo.pro`，选择 `Desktop Qt 5.15.2 MSVC2019 64bit` Kit，直接构建运行。
+Open `demo/demo.pro`, select the `Desktop Qt 5.15.2 MSVC2019 64bit` kit, and build.
 
-**3. 双显卡笔记本**
+**3. Dual-GPU laptops**
 
-`main.cpp` 顶部已导出 `NvOptimusEnablement` 和 `AmdPowerXpressRequestHighPerformance` 符号，NVIDIA / AMD 驱动会自动将本进程切至独立 GPU。
+`main.cpp` already exports `NvOptimusEnablement` and `AmdPowerXpressRequestHighPerformance`. NVIDIA / AMD drivers will automatically route the process to the discrete GPU.
 
-将此代码段复制到你自己项目的 `main.cpp` 顶部（必须在主可执行文件中，静态库 / DLL 中无效）：
+Copy this snippet to the top of your own project's `main.cpp` (must be in the main executable — ineffective inside static libraries or DLLs):
 
 ```cpp
 #if defined(_WIN32)
@@ -98,9 +100,9 @@ extern "C" {
 #endif
 ```
 
-## 在自己的项目中使用
+## Using in Your Own Project
 
-**C++ 端**：在 `.pro` 文件中引入，并在 `main()` 里注册 QML 类型：
+**C++ side** — include in your `.pro` file and register the QML type in `main()`:
 
 ```qmake
 include(path/to/src/qmujocosim.pri)
@@ -109,12 +111,12 @@ include(path/to/src/qmujocosim.pri)
 ```cpp
 // main.cpp
 QGuiApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
-QGuiApplication::setAttribute(Qt::AA_ShareOpenGLContexts); // 必须
+QGuiApplication::setAttribute(Qt::AA_ShareOpenGLContexts); // required
 
 qmlRegisterType<MujocoQuickItem>("QMuJoCoSim", 1, 0, "MujocoView");
 ```
 
-**QML 端**：
+**QML side**:
 
 ```qml
 import QMuJoCoSim 1.0
@@ -127,13 +129,13 @@ MujocoView {
 }
 ```
 
-**C++ 热切换模型**（线程安全）：
+**Hot-swap model from C++** (thread-safe):
 
 ```cpp
 mujocoViewItem->loadScene("new_model.xml");
 ```
 
-**通过 RobotSimulator 交付库使用**：
+**Via the RobotSimulator delivery library**:
 
 ```cpp
 #include "robotSimulator.h"
@@ -145,36 +147,38 @@ view->setSimulationRunning(false);
 view->loadScene("robot.mjb");
 ```
 
-`RobotSim::SimulationView` 只是兼容旧代码的类型别名，所有属性、信号和 `Q_INVOKABLE` 方法都来自 `MujocoQuickItem` 本体。`SimulationController` 创建的视图默认关闭左右 MuJoCo 内置 UI；直接实例化 `MujocoQuickItem` 时仍保留 QMuJoCoSim demo 的默认 UI 行为。
+`RobotSim::SimulationView` is a compatibility alias; all properties, signals, and `Q_INVOKABLE` methods come from `MujocoQuickItem` itself. Views created by `SimulationController` disable the left and right MuJoCo built-in UI panels by default. Directly instantiating `MujocoQuickItem` preserves the QMuJoCoSim demo's default UI behaviour.
 
-**QML 拖拽加载**：demo 中的 `DropArea` 示例可直接复用，将 `.xml` / `.mjb` 拖入窗口即可切换。
+**QML drag-and-drop**: The `DropArea` example in the demo can be reused directly — drag a `.xml` or `.mjb` file onto the window to switch models.
 
-## 模型库
+## Model Library
 
-MuJoCo 官方提供了丰富的示例模型，可在 [MuJoCo 模型库](https://mujoco.readthedocs.io/en/stable/models.html) 中找到。
+MuJoCo ships an extensive set of example models. Browse them at the [MuJoCo Model Zoo](https://mujoco.readthedocs.io/en/stable/models.html).
 
 ---
 
-## 对 MuJoCo vendored 源码的补丁说明
+## Patches to MuJoCo Vendored Sources
 
-> 升级 `mujoco-*-windows-x86_64` 时，需将以下改动重新应用到新版本对应文件。
+> When upgrading to a new `mujoco-*-windows-x86_64` release, re-apply the changes listed below to the corresponding files in the new version.
 
-### 背景
+### Background
 
-中上方的 `PAUSE / LOADING...` 覆盖文字由官方 `simulate.cc::Simulate::Render()` 直接调用
-`mjr_overlay(mjFONT_BIG, mjGRID_TOP, ...)` 绘制进离屏 FBO，无法在封装层拦截。
-为此给 `Simulate` 添加了 `status_overlay` 开关与 `status_overlay_text` 只读缓冲，
-再通过 `MujocoQuickItem::statusOverlayVisible` / `statusOverlayText` 属性暴露给 QML。
+The `PAUSE / LOADING...` overlay near the top-centre of the viewport is drawn by
+`simulate.cc::Simulate::Render()` via a direct `mjr_overlay(mjFONT_BIG, mjGRID_TOP, ...)` call
+into the offscreen FBO — it cannot be intercepted at the wrapper level.
+To work around this, a `status_overlay` toggle and a `status_overlay_text` read-only buffer
+were added to `Simulate`, then exposed to QML through the
+`MujocoQuickItem::statusOverlayVisible` / `statusOverlayText` properties.
 
-[补丁请查看 `patches/status-overlay.patch`](patches/status-overlay.patch)，共 4 处改动
+[See `patches/status-overlay.patch`](patches/status-overlay.patch) — 4 change sites in total.
 
-### 升级步骤
+### Upgrade Steps
 
-1. 将新版 `mujoco-X.Y.Z-windows-x86_64/` 目录放到本仓库同级目录，更新 `src/qmujocosim.pri` 中的 `MUJOCO_DIR`。
-2. 在新版 `simulate/` 目录下执行：
+1. Place the new `mujoco-X.Y.Z-windows-x86_64/` directory alongside this repository and update `MUJOCO_DIR` in `src/qmujocosim.pri`.
+2. Inside the new `simulate/` directory, run:
    ```bash
    git apply --directory=mujoco-X.Y.Z-windows-x86_64 patches/status-overlay.patch
    ```
-   若补丁因上下文偏移无法自动应用，请手动合并，改动点共 **4 处**：
-   - `simulate.h`：在 `pause_update` 下方加 `status_overlay` 字段；在 `load_error` 下方加 `status_overlay_text` 字段。
-   - `simulate.cc`：在 `zoom_increment` 之后加 `UpdateStatusOverlayText()` 函数；在 `Render()` 开头调用它；将两处绘制 overlay 的代码改为受 `status_overlay` 开关控制。
+   If the patch cannot be applied automatically due to context drift, merge manually. There are **4 change sites**:
+   - `simulate.h`: add the `status_overlay` field below `pause_update`; add the `status_overlay_text` field below `load_error`.
+   - `simulate.cc`: add `UpdateStatusOverlayText()` after `zoom_increment`; call it at the start of `Render()`; gate both overlay-drawing calls behind the `status_overlay` toggle.
