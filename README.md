@@ -2,6 +2,8 @@
 
 **English** | [中文](README.zh-CN.md)
 
+![snapshot](assets/QMuJoCoScene.jpg)
+
 A library that embeds the official [MuJoCo](https://github.com/google-deepmind/mujoco) [`Simulate`](https://github.com/google-deepmind/mujoco/tree/main/simulate) viewer as a QML component inside a Qt Quick application. No GLFW required — full MuJoCo physics simulation and interactive 3D rendering run directly within the QML scene.
 
 ## Preview
