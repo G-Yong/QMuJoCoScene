@@ -1,8 +1,6 @@
-# QMuJoCoSim
+# QMuJoCoScene
 
 **English** | [中文](README.zh-CN.md)
-
-![snapshot](assets/QMuJoCoSim.png)
 
 A library that embeds the official [MuJoCo](https://github.com/google-deepmind/mujoco) [`Simulate`](https://github.com/google-deepmind/mujoco/tree/main/simulate) viewer as a QML component inside a Qt Quick application. No GLFW required — full MuJoCo physics simulation and interactive 3D rendering run directly within the QML scene.
 
@@ -19,7 +17,7 @@ A library that embeds the official [MuJoCo](https://github.com/google-deepmind/m
 - **Three-thread architecture**: The render thread, physics simulation thread, and Qt main thread each have a dedicated role and never block one another.
 - **Drag-and-drop model loading**: Drop a `.xml` or `.mjb` file directly onto the window to hot-swap the model.
 - **Discrete GPU preference**: Exports `NvOptimusEnablement` / `AmdPowerXpressRequestHighPerformance` symbols so the driver automatically selects the discrete GPU on dual-GPU laptops.
-- **Object trajectory visualisation**: [`addTrajectory`](https://github.com/G-Yong/QMuJoCoSim/blob/master/src/MujocoQuickItem.h#L171) and [`setTrajectoryTrackedSite`](https://github.com/G-Yong/QMuJoCoSim/blob/master/src/MujocoQuickItem.h#L200) APIs let users create and manage trajectory objects from QML, providing real-time visualisation of body motion paths (dynamically updated each frame).
+- **Object trajectory visualisation**: [`addTrajectory`](https://github.com/G-Yong/QMuJoCoScene/blob/master/src/MujocoQuickItem.h#L171) and [`setTrajectoryTrackedSite`](https://github.com/G-Yong/QMuJoCoScene/blob/master/src/MujocoQuickItem.h#L200) APIs let users create and manage trajectory objects from QML, providing real-time visualisation of body motion paths (dynamically updated each frame).
 
 ## Architecture
 
@@ -105,7 +103,7 @@ extern "C" {
 **C++ side** — include in your `.pro` file and register the QML type in `main()`:
 
 ```qmake
-include(path/to/src/qmujocosim.pri)
+include(path/to/src/QMuJoCoScene.pri)
 ```
 
 ```cpp
@@ -113,13 +111,13 @@ include(path/to/src/qmujocosim.pri)
 QGuiApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
 QGuiApplication::setAttribute(Qt::AA_ShareOpenGLContexts); // required
 
-qmlRegisterType<MujocoQuickItem>("QMuJoCoSim", 1, 0, "MujocoView");
+qmlRegisterType<MujocoQuickItem>("QMuJoCoScene", 1, 0, "MujocoView");
 ```
 
 **QML side**:
 
 ```qml
-import QMuJoCoSim 1.0
+import QMuJoCoScene 1.0
 
 MujocoView {
     anchors.fill: parent
@@ -147,7 +145,7 @@ view->setSimulationRunning(false);
 view->loadScene("robot.mjb");
 ```
 
-`RobotSim::SimulationView` is a compatibility alias; all properties, signals, and `Q_INVOKABLE` methods come from `MujocoQuickItem` itself. Views created by `SimulationController` disable the left and right MuJoCo built-in UI panels by default. Directly instantiating `MujocoQuickItem` preserves the QMuJoCoSim demo's default UI behaviour.
+`RobotSim::SimulationView` is a compatibility alias; all properties, signals, and `Q_INVOKABLE` methods come from `MujocoQuickItem` itself. Views created by `SimulationController` disable the left and right MuJoCo built-in UI panels by default. Directly instantiating `MujocoQuickItem` preserves the QMuJoCoScene demo's default UI behaviour.
 
 **QML drag-and-drop**: The `DropArea` example in the demo can be reused directly — drag a `.xml` or `.mjb` file onto the window to switch models.
 
@@ -174,7 +172,7 @@ were added to `Simulate`, then exposed to QML through the
 
 ### Upgrade Steps
 
-1. Place the new `mujoco-X.Y.Z-windows-x86_64/` directory alongside this repository and update `MUJOCO_DIR` in `src/qmujocosim.pri`.
+1. Place the new `mujoco-X.Y.Z-windows-x86_64/` directory alongside this repository and update `MUJOCO_DIR` in `src/QMuJoCoScene.pri`.
 2. Inside the new `simulate/` directory, run:
    ```bash
    git apply --directory=mujoco-X.Y.Z-windows-x86_64 patches/status-overlay.patch

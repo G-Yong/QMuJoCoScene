@@ -1,8 +1,6 @@
-# QMuJoCoSim
+# QMuJoCoScene
 
 [English](README.md) | **中文**
-
-![snapshot](assets/QMuJoCoSim.png)
 
 将 [MuJoCo](https://github.com/google-deepmind/mujoco) 官方 [`Simulate`](https://github.com/google-deepmind/mujoco/tree/main/simulate) 查看器以 QML 组件的形式嵌入 Qt Quick 应用的集成库。无需 GLFW，直接在 QML 场景中运行完整的 MuJoCo 物理仿真与交互式 3D 渲染。
 
@@ -19,7 +17,7 @@
 - **三线程架构**：渲染线程、物理仿真线程、Qt 主线程各司其职，互不阻塞。
 - **拖拽加载模型**：直接将 `.xml` / `.mjb` 文件拖入窗口即可热切换模型。
 - **独立 GPU 优先**：导出 `NvOptimusEnablement` / `AmdPowerXpressRequestHighPerformance` 符号，在双显卡笔记本上自动选用独立 GPU。
-- **物体运动轨迹可视化**：在 `MujocoQuickItem` 中添加了 [`addTrajectory`](https://github.com/G-Yong/QMuJoCoSim/blob/master/src/MujocoQuickItem.h#L171) 以及 [`setTrajectoryTrackedSite`](https://github.com/G-Yong/QMuJoCoSim/blob/master/src/MujocoQuickItem.h#L200) 等接口，允许用户在 QML 端创建和管理轨迹对象，实时可视化指定物体的运动轨迹（动态刷新）。
+- **物体运动轨迹可视化**：在 `MujocoQuickItem` 中添加了 [`addTrajectory`](https://github.com/G-Yong/QMuJoCoScene/blob/master/src/MujocoQuickItem.h#L171) 以及 [`setTrajectoryTrackedSite`](https://github.com/G-Yong/QMuJoCoScene/blob/master/src/MujocoQuickItem.h#L200) 等接口，允许用户在 QML 端创建和管理轨迹对象，实时可视化指定物体的运动轨迹（动态刷新）。
 
 ## 架构
 
@@ -105,7 +103,7 @@ extern "C" {
 **C++ 端**：在 `.pro` 文件中引入，并在 `main()` 里注册 QML 类型：
 
 ```qmake
-include(path/to/src/qmujocosim.pri)
+include(path/to/src/QMuJoCoScene.pri)
 ```
 
 ```cpp
@@ -113,13 +111,13 @@ include(path/to/src/qmujocosim.pri)
 QGuiApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
 QGuiApplication::setAttribute(Qt::AA_ShareOpenGLContexts); // 必须
 
-qmlRegisterType<MujocoQuickItem>("QMuJoCoSim", 1, 0, "MujocoView");
+qmlRegisterType<MujocoQuickItem>("QMuJoCoScene", 1, 0, "MujocoView");
 ```
 
 **QML 端**：
 
 ```qml
-import QMuJoCoSim 1.0
+import QMuJoCoScene 1.0
 
 MujocoView {
     anchors.fill: parent
@@ -147,7 +145,7 @@ view->setSimulationRunning(false);
 view->loadScene("robot.mjb");
 ```
 
-`RobotSim::SimulationView` 只是兼容旧代码的类型别名，所有属性、信号和 `Q_INVOKABLE` 方法都来自 `MujocoQuickItem` 本体。`SimulationController` 创建的视图默认关闭左右 MuJoCo 内置 UI；直接实例化 `MujocoQuickItem` 时仍保留 QMuJoCoSim demo 的默认 UI 行为。
+`RobotSim::SimulationView` 只是兼容旧代码的类型别名，所有属性、信号和 `Q_INVOKABLE` 方法都来自 `MujocoQuickItem` 本体。`SimulationController` 创建的视图默认关闭左右 MuJoCo 内置 UI；直接实例化 `MujocoQuickItem` 时仍保留 QMuJoCoScene demo 的默认 UI 行为。
 
 **QML 拖拽加载**：demo 中的 `DropArea` 示例可直接复用，将 `.xml` / `.mjb` 拖入窗口即可切换。
 
@@ -172,7 +170,7 @@ MuJoCo 官方提供了丰富的示例模型，可在 [MuJoCo 模型库](https://
 
 ### 升级步骤
 
-1. 将新版 `mujoco-X.Y.Z-windows-x86_64/` 目录放到本仓库同级目录，更新 `src/qmujocosim.pri` 中的 `MUJOCO_DIR`。
+1. 将新版 `mujoco-X.Y.Z-windows-x86_64/` 目录放到本仓库同级目录，更新 `src/QMuJoCoScene.pri` 中的 `MUJOCO_DIR`。
 2. 在新版 `simulate/` 目录下执行：
    ```bash
    git apply --directory=mujoco-X.Y.Z-windows-x86_64 patches/status-overlay.patch
