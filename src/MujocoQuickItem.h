@@ -25,6 +25,7 @@
 #include <QSize>
 #include <QVariant>
 #include <QVector4D>
+#include <QQuaternion>
 #include <QtCore/qglobal.h>
 #include <atomic>
 #include <deque>
@@ -249,6 +250,15 @@ public:
     Q_INVOKABLE QVariantList objects() const;
     // 按 MuJoCo body id 设置 body 位置。free joint body 写入 qpos；静态 body 修改 body_pos。
     Q_INVOKABLE bool setObjectPosition(int bodyId, const QVector3D& position);
+    // 按 MuJoCo body id 设置 body 姿态（四元数，标量在前，对应 MuJoCo [w,x,y,z]；
+    // QML 中用 Qt.quaternion(w, x, y, z) 构造）。free joint body 写入 qpos 的四元数分量；
+    // 静态 body 修改 body_quat（相对父 body 的局部姿态）。传入的四元数会自动归一化。
+    Q_INVOKABLE bool setObjectOrientation(int bodyId, const QQuaternion& orientation);
+    // 按 MuJoCo body id 同时设置 body 的位置与姿态，语义等同于先后调用
+    // setObjectPosition 与 setObjectOrientation，但只做一次 mj_forward。
+    Q_INVOKABLE bool setObjectPose(int bodyId,
+                                   const QVector3D& position,
+                                   const QQuaternion& orientation);
     // 按 MuJoCo body id 设置其直属 geoms 的绝对 size 参数。
     Q_INVOKABLE bool setObjectSize(int bodyId, const QVector3D& size);
     // 按 MuJoCo body id 对其直属 geoms 的 size 参数做乘法缩放。

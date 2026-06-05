@@ -1327,6 +1327,8 @@ static SceneObjectInfo buildSceneObjectInfo(const mjModel* model, const mjData* 
     info.parentName = objectName(model, mjOBJ_BODY, info.parentBodyId);
     info.position = vectorFrom3(data->xpos + 3 * bodyId);
     info.localPosition = vectorFrom3(model->body_pos + 3 * bodyId);
+    info.orientation = quaternionFrom4(data->xquat + 4 * bodyId);
+    info.localOrientation = quaternionFrom4(model->body_quat + 4 * bodyId);
     info.mass = static_cast<double>(model->body_mass[bodyId]);
     info.jointCount = model->body_jntnum[bodyId];
     info.geomCount = model->body_geomnum[bodyId];
@@ -1426,6 +1428,56 @@ bool MujocoQuickItem::setObjectPosition(int bodyId, const QVector3D& position)
                                  freeJointId, position);
         } else {
             setBodyLocalPositionFromWorld(sim.m_, sim.d_, bodyId, position);
+            mj_setConst(sim.m_, sim.d_);
+        }
+        mj_forward(sim.m_, sim.d_);
+        markUiRefresh(sim);
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setObjectOrientation(int bodyId, const QQuaternion& orientation)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_ || bodyId < 0 || bodyId >= sim.m_->nbody) return;
+
+        const int freeJointId = freeJointIndexForBody(sim.m_, bodyId);
+        if (freeJointId >= 0) {
+            setFreeJointOrientation(sim.m_, sim.d_,
+                                    sim.qpos_, sim.qpos_prev_,
+                                    freeJointId, orientation);
+        } else {
+            setBodyLocalOrientationFromWorld(sim.m_, sim.d_, bodyId, orientation);
+            mj_setConst(sim.m_, sim.d_);
+        }
+        mj_forward(sim.m_, sim.d_);
+        markUiRefresh(sim);
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setObjectPose(int bodyId,
+                                    const QVector3D& position,
+                                    const QQuaternion& orientation)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_ || bodyId < 0 || bodyId >= sim.m_->nbody) return;
+
+        const int freeJointId = freeJointIndexForBody(sim.m_, bodyId);
+        if (freeJointId >= 0) {
+            setFreeJointPosition(sim.m_, sim.d_,
+                                 sim.qpos_, sim.qpos_prev_,
+                                 freeJointId, position);
+            setFreeJointOrientation(sim.m_, sim.d_,
+                                    sim.qpos_, sim.qpos_prev_,
+                                    freeJointId, orientation);
+        } else {
+            setBodyLocalPositionFromWorld(sim.m_, sim.d_, bodyId, position);
+            setBodyLocalOrientationFromWorld(sim.m_, sim.d_, bodyId, orientation);
             mj_setConst(sim.m_, sim.d_);
         }
         mj_forward(sim.m_, sim.d_);

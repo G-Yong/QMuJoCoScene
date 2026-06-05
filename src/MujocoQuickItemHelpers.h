@@ -24,6 +24,7 @@
 #include <QVariantList>
 #include <QVector3D>
 #include <QVector4D>
+#include <QQuaternion>
 
 #include <vector>
 
@@ -341,6 +342,40 @@ inline void setFreeJointPosition(mjModel* model, mjData* data,
     }
 }
 
+// QQuaternion -> MuJoCo 四元数 [w,x,y,z]，并归一化保证为单位四元数。
+inline void quaternionToMj(const QQuaternion& q, mjtNum out[4]) {
+    out[0] = q.scalar();
+    out[1] = q.x();
+    out[2] = q.y();
+    out[3] = q.z();
+    mju_normalize4(out);
+}
+
+// MuJoCo 四元数 [w,x,y,z] -> QQuaternion(scalar, x, y, z)。
+inline QQuaternion quaternionFrom4(const mjtNum* q) {
+    return QQuaternion(static_cast<float>(q[0]), static_cast<float>(q[1]),
+                       static_cast<float>(q[2]), static_cast<float>(q[3]));
+}
+
+// 在持有 sim.mtx 时调用：把 free joint 的四元数分量写到 d->qpos（adr+3..adr+6）
+// 与 sim 缓存向量，仅修改姿态、保留原有位置分量。
+inline void setFreeJointOrientation(mjModel* model, mjData* data,
+                                    std::vector<mjtNum>& qposCache,
+                                    std::vector<mjtNum>& qposPrevCache,
+                                    int jointId, const QQuaternion& orientation) {
+    if (!model || !data || jointId < 0) return;
+    const int adr = model->jnt_qposadr[jointId];
+    mjtNum quat[4];
+    quaternionToMj(orientation, quat);
+    for (int i = 0; i < 4; ++i) data->qpos[adr + 3 + i] = quat[i];
+    if (qposCache.size() >= static_cast<size_t>(adr + 7)) {
+        for (int i = 0; i < 4; ++i) qposCache[adr + 3 + i] = quat[i];
+    }
+    if (qposPrevCache.size() >= static_cast<size_t>(adr + 7)) {
+        for (int i = 0; i < 4; ++i) qposPrevCache[adr + 3 + i] = quat[i];
+    }
+}
+
 // mj_recompile 之后，sim.qpos_ / qpos_prev_ 仍保持旧 nq。
 // 重新 resize 并从 d_->qpos 同步，避免 Simulate::Sync() 越界读到的旧
 // 缓存数据被回写到 d_->qpos，造成新加 free-joint body 的位置被
@@ -365,6 +400,22 @@ inline void setBodyLocalPositionFromWorld(mjModel* model, mjData* data,
     bodyPos[0] = parentMat[0] * dx + parentMat[3] * dy + parentMat[6] * dz;
     bodyPos[1] = parentMat[1] * dx + parentMat[4] * dy + parentMat[7] * dz;
     bodyPos[2] = parentMat[2] * dx + parentMat[5] * dy + parentMat[8] * dz;
+}
+
+// 把世界姿态转换为相对父 body 的局部四元数并写入 model->body_quat。
+// body_quat = conj(parent_xquat) * world_quat（单位四元数的逆即共轭）。
+inline void setBodyLocalOrientationFromWorld(mjModel* model, mjData* data,
+                                             int bodyId, const QQuaternion& worldOrientation) {
+    const int parentId = model->body_parentid[bodyId];
+    mjtNum worldQuat[4];
+    quaternionToMj(worldOrientation, worldQuat);
+    mjtNum invParent[4];
+    mju_negQuat(invParent, data->xquat + 4 * parentId);
+    mjtNum localQuat[4];
+    mju_mulQuat(localQuat, invParent, worldQuat);
+    mju_normalize4(localQuat);
+    mjtNum* bodyQuat = model->body_quat + 4 * bodyId;
+    for (int i = 0; i < 4; ++i) bodyQuat[i] = localQuat[i];
 }
 
 inline void markUiRefresh(mujoco::Simulate& sim) {

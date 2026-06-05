@@ -1,6 +1,7 @@
 #pragma once
 #include <QString>
 #include <QVector3D>
+#include <QQuaternion>
 #include <QMetaType>
 #include <QList>
 
@@ -46,6 +47,8 @@ Q_DECLARE_METATYPE(JointInfo)
 //   parentBodyId / parentName — 父 body。
 //   position             — body 当前世界坐标（来自 mjData::xpos）。
 //   localPosition        — body 相对父 body 的模型坐标（来自 mjModel::body_pos）。
+//   orientation          — body 当前世界姿态四元数 [w,x,y,z]（来自 mjData::xquat）。
+//   localOrientation     — body 相对父 body 的局部姿态四元数（来自 mjModel::body_quat）。
 //   mass                 — body 质量。
 //   jointCount / geomCount — 当前 body 直属 joint / geom 数量。
 //   movable              — 是否有自由度；true 时位置通常由 qpos 控制。
@@ -59,6 +62,8 @@ struct SceneObjectInfo {
     Q_PROPERTY(QString  parentName   MEMBER parentName   CONSTANT)
     Q_PROPERTY(QVector3D position    MEMBER position     CONSTANT)
     Q_PROPERTY(QVector3D localPosition MEMBER localPosition CONSTANT)
+    Q_PROPERTY(QQuaternion orientation MEMBER orientation CONSTANT)
+    Q_PROPERTY(QQuaternion localOrientation MEMBER localOrientation CONSTANT)
     Q_PROPERTY(double   mass         MEMBER mass         CONSTANT)
     Q_PROPERTY(int      jointCount   MEMBER jointCount   CONSTANT)
     Q_PROPERTY(int      geomCount    MEMBER geomCount    CONSTANT)
@@ -75,6 +80,8 @@ public:
     QString  parentName;
     QVector3D position;
     QVector3D localPosition;
+    QQuaternion orientation;
+    QQuaternion localOrientation;
     double   mass       = 0.0;
     int      jointCount = 0;
     int      geomCount  = 0;
