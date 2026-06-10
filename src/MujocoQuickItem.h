@@ -263,6 +263,14 @@ public:
     Q_INVOKABLE bool setObjectSize(int bodyId, const QVector3D& size);
     // 按 MuJoCo body id 对其直属 geoms 的 size 参数做乘法缩放。
     Q_INVOKABLE bool scaleObject(int bodyId, const QVector3D& scale);
+    // 按 MuJoCo body id 设置其直属 geoms 的颜色（rgba，0~1）。用于碰撞高亮等。
+    // 仅修改 geom_rgba，不影响材质贴图；返回是否命中至少一个 geom。
+    Q_INVOKABLE bool setObjectColor(int bodyId, const QVector4D& rgba);
+
+    // 提取指定 body 所有三角网格 geom 的合并三角网格，顶点位于 body 局部坐标系
+    // （已按各 geom 的 geom_pos/geom_quat 变换），单位为米。供外部碰撞库（如 coal）
+    // 构建精确网格碰撞模型。body 无 mesh geom 时返回 valid=false。
+    Q_INVOKABLE BodyMeshData bodyCollisionMesh(int bodyId) const;
 
     // ------------------------------------------------------------------
     // 关节查询与控制接口

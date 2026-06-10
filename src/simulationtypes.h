@@ -1,6 +1,8 @@
 #pragma once
 #include <QString>
+#include <QVector>
 #include <QVector3D>
+#include <QVector4D>
 #include <QQuaternion>
 #include <QMetaType>
 #include <QList>
@@ -73,6 +75,7 @@ struct SceneObjectInfo {
     Q_PROPERTY(int      firstGeomType MEMBER firstGeomType CONSTANT)
     Q_PROPERTY(QString  firstGeomTypeName MEMBER firstGeomTypeName CONSTANT)
     Q_PROPERTY(QVector3D firstGeomSize MEMBER firstGeomSize CONSTANT)
+    Q_PROPERTY(QVector4D firstGeomRgba MEMBER firstGeomRgba CONSTANT)
 public:
     int      bodyId       = -1;
     QString  name;
@@ -91,8 +94,34 @@ public:
     int      firstGeomType = -1;
     QString  firstGeomTypeName;
     QVector3D firstGeomSize;
+    QVector4D firstGeomRgba {1.0f, 1.0f, 1.0f, 1.0f};
 };
 Q_DECLARE_METATYPE(SceneObjectInfo)
+
+// ---------------------------------------------------------------------------
+// BodyMeshData — 某个 body 的三角网格快照，用于外部碰撞库（如 coal）做
+// 精确网格碰撞检测。顶点位于 body 局部坐标系（已合并该 body 所有 mesh geom，
+// 并按各 geom 的 geom_pos/geom_quat 变换到 body 帧），单位为米。
+//
+// 字段说明：
+//   vertices  — body 局部坐标系下的顶点列表。
+//   indices   — 三角面索引，长度为 3 * 三角形数，每 3 个为一个三角形。
+//   valid     — 是否成功提取到至少一个三角网格 geom。
+// ---------------------------------------------------------------------------
+struct BodyMeshData {
+    Q_GADGET
+    Q_PROPERTY(int vertexCount READ vertexCount)
+    Q_PROPERTY(int triangleCount READ triangleCount)
+    Q_PROPERTY(bool valid MEMBER valid)
+public:
+    QVector<QVector3D> vertices;
+    QVector<int>       indices;
+    bool               valid = false;
+
+    int vertexCount() const { return vertices.size(); }
+    int triangleCount() const { return indices.size() / 3; }
+};
+Q_DECLARE_METATYPE(BodyMeshData)
 
 // ---------------------------------------------------------------------------
 // ContactInfo — 单次接触（contact）的快照数据。支持 Q_GADGET，可在 QML 中读取。

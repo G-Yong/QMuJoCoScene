@@ -1341,6 +1341,8 @@ static SceneObjectInfo buildSceneObjectInfo(const mjModel* model, const mjData* 
         info.firstGeomType = model->geom_type[geomId];
         info.firstGeomTypeName = geomTypeName(info.firstGeomType);
         info.firstGeomSize = vectorFrom3(model->geom_size + 3 * geomId);
+        const float* rgba = model->geom_rgba + 4 * geomId;
+        info.firstGeomRgba = QVector4D(rgba[0], rgba[1], rgba[2], rgba[3]);
     }
     return info;
 }
@@ -1513,6 +1515,74 @@ bool MujocoQuickItem::scaleObject(int bodyId, const QVector3D& scale)
         applied = true;
     });
     return applied;
+}
+
+bool MujocoQuickItem::setObjectColor(int bodyId, const QVector4D& rgba)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        mjModel* model = sim.m_;
+        if (!model || bodyId < 0 || bodyId >= model->nbody) return;
+        const int geomCount = model->body_geomnum[bodyId];
+        const int firstGeom = model->body_geomadr[bodyId];
+        if (geomCount <= 0 || firstGeom < 0) return;
+        for (int i = 0; i < geomCount; ++i) {
+            float* dst = model->geom_rgba + 4 * (firstGeom + i);
+            dst[0] = rgba.x();
+            dst[1] = rgba.y();
+            dst[2] = rgba.z();
+            dst[3] = rgba.w();
+        }
+        markUiRefresh(sim);
+        applied = true;
+    });
+    return applied;
+}
+
+BodyMeshData MujocoQuickItem::bodyCollisionMesh(int bodyId) const
+{
+    BodyMeshData result;
+    withSimulation([&](const mjModel* model, mjData*) {
+        if (!model || bodyId < 0 || bodyId >= model->nbody) return;
+        const int geomCount = model->body_geomnum[bodyId];
+        const int firstGeom = model->body_geomadr[bodyId];
+        if (geomCount <= 0 || firstGeom < 0) return;
+
+        for (int g = 0; g < geomCount; ++g) {
+            const int geomId = firstGeom + g;
+            if (model->geom_type[geomId] != mjGEOM_MESH) continue;
+            const int meshId = model->geom_dataid[geomId];
+            if (meshId < 0 || meshId >= model->nmesh) continue;
+
+            const int vertAdr = model->mesh_vertadr[meshId];
+            const int vertNum = model->mesh_vertnum[meshId];
+            const int faceAdr = model->mesh_faceadr[meshId];
+            const int faceNum = model->mesh_facenum[meshId];
+            if (vertNum <= 0 || faceNum <= 0) continue;
+
+            // geom 局部位姿（相对 body），把 mesh 顶点变换到 body 坐标系。
+            const QVector3D geomPos = vectorFrom3(model->geom_pos + 3 * geomId);
+            QQuaternion geomQuat = quaternionFrom4(model->geom_quat + 4 * geomId);
+            geomQuat.normalize();
+
+            const int base = result.vertices.size();
+            result.vertices.reserve(base + vertNum);
+            for (int v = 0; v < vertNum; ++v) {
+                const float* mv = model->mesh_vert + 3 * (vertAdr + v);
+                const QVector3D local(mv[0], mv[1], mv[2]);
+                result.vertices.append(geomPos + geomQuat.rotatedVector(local));
+            }
+            result.indices.reserve(result.indices.size() + faceNum * 3);
+            for (int f = 0; f < faceNum; ++f) {
+                const int* face = model->mesh_face + 3 * (faceAdr + f);
+                result.indices.append(base + face[0]);
+                result.indices.append(base + face[1]);
+                result.indices.append(base + face[2]);
+            }
+            result.valid = true;
+        }
+    });
+    return result;
 }
 
 // ---------------------------------------------------------------------------
