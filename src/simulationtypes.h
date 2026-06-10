@@ -76,6 +76,8 @@ struct SceneObjectInfo {
     Q_PROPERTY(QString  firstGeomTypeName MEMBER firstGeomTypeName CONSTANT)
     Q_PROPERTY(QVector3D firstGeomSize MEMBER firstGeomSize CONSTANT)
     Q_PROPERTY(QVector4D firstGeomRgba MEMBER firstGeomRgba CONSTANT)
+    Q_PROPERTY(int      firstGeomContype MEMBER firstGeomContype CONSTANT)
+    Q_PROPERTY(int      firstGeomConaffinity MEMBER firstGeomConaffinity CONSTANT)
 public:
     int      bodyId       = -1;
     QString  name;
@@ -95,6 +97,8 @@ public:
     QString  firstGeomTypeName;
     QVector3D firstGeomSize;
     QVector4D firstGeomRgba {1.0f, 1.0f, 1.0f, 1.0f};
+    int       firstGeomContype    = 0;
+    int       firstGeomConaffinity = 0;
 };
 Q_DECLARE_METATYPE(SceneObjectInfo)
 

@@ -1343,6 +1343,8 @@ static SceneObjectInfo buildSceneObjectInfo(const mjModel* model, const mjData* 
         info.firstGeomSize = vectorFrom3(model->geom_size + 3 * geomId);
         const float* rgba = model->geom_rgba + 4 * geomId;
         info.firstGeomRgba = QVector4D(rgba[0], rgba[1], rgba[2], rgba[3]);
+        info.firstGeomContype    = model->geom_contype[geomId];
+        info.firstGeomConaffinity = model->geom_conaffinity[geomId];
     }
     return info;
 }
@@ -1537,6 +1539,62 @@ bool MujocoQuickItem::setObjectColor(int bodyId, const QVector4D& rgba)
         applied = true;
     });
     return applied;
+}
+
+bool MujocoQuickItem::setObjectContype(int bodyId, int contype)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        mjModel* model = sim.m_;
+        if (!model || bodyId < 0 || bodyId >= model->nbody) return;
+        const int geomCount = model->body_geomnum[bodyId];
+        const int firstGeom = model->body_geomadr[bodyId];
+        if (geomCount <= 0 || firstGeom < 0) return;
+        for (int i = 0; i < geomCount; ++i)
+            model->geom_contype[firstGeom + i] = contype;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setObjectConaffinity(int bodyId, int conaffinity)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        mjModel* model = sim.m_;
+        if (!model || bodyId < 0 || bodyId >= model->nbody) return;
+        const int geomCount = model->body_geomnum[bodyId];
+        const int firstGeom = model->body_geomadr[bodyId];
+        if (geomCount <= 0 || firstGeom < 0) return;
+        for (int i = 0; i < geomCount; ++i)
+            model->geom_conaffinity[firstGeom + i] = conaffinity;
+        applied = true;
+    });
+    return applied;
+}
+
+int MujocoQuickItem::objectContype(int bodyId) const
+{
+    int result = 0;
+    withSimulation([&](const mjModel* model, mjData*) {
+        if (!model || bodyId < 0 || bodyId >= model->nbody) return;
+        const int firstGeom = model->body_geomadr[bodyId];
+        if (model->body_geomnum[bodyId] > 0 && firstGeom >= 0)
+            result = model->geom_contype[firstGeom];
+    });
+    return result;
+}
+
+int MujocoQuickItem::objectConaffinity(int bodyId) const
+{
+    int result = 0;
+    withSimulation([&](const mjModel* model, mjData*) {
+        if (!model || bodyId < 0 || bodyId >= model->nbody) return;
+        const int firstGeom = model->body_geomadr[bodyId];
+        if (model->body_geomnum[bodyId] > 0 && firstGeom >= 0)
+            result = model->geom_conaffinity[firstGeom];
+    });
+    return result;
 }
 
 BodyMeshData MujocoQuickItem::bodyCollisionMesh(int bodyId) const

@@ -267,6 +267,14 @@ public:
     // 仅修改 geom_rgba，不影响材质贴图；返回是否命中至少一个 geom。
     Q_INVOKABLE bool setObjectColor(int bodyId, const QVector4D& rgba);
 
+    // 按 MuJoCo body id 设置其直属 geoms 的碰撞属性，用于关闭/开启 MuJoCo 自身
+    // 碰撞（例如把 body 抽离到 coal 做精确碰撞后，应设为 0 避免重复检测）。
+    // contype：允许我去碰别人；conaffinity：允许别人来碰我；均为位掩码，0 表示不参与。
+    Q_INVOKABLE bool setObjectContype(int bodyId, int contype);
+    Q_INVOKABLE bool setObjectConaffinity(int bodyId, int conaffinity);
+    Q_INVOKABLE int  objectContype(int bodyId) const;
+    Q_INVOKABLE int  objectConaffinity(int bodyId) const;
+
     // 提取指定 body 所有三角网格 geom 的合并三角网格，顶点位于 body 局部坐标系
     // （已按各 geom 的 geom_pos/geom_quat 变换），单位为米。供外部碰撞库（如 coal）
     // 构建精确网格碰撞模型。body 无 mesh geom 时返回 valid=false。
