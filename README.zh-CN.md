@@ -8,6 +8,8 @@
 
 ## 效果
 
+https://github.com/user-attachments/assets/49a18818-608c-457d-b89a-a16b8b40a035
+
 ![snapshot](assets/snapshot.png)
 
 ## 特性
