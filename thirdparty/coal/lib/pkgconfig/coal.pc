@@ -1,0 +1,22 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${pcfiledir}/../..
+libdir=${pcfiledir}/../../lib
+bindir=${pcfiledir}/../../bin
+pkglibdir=${pcfiledir}/../../lib/coal
+includedir=${pcfiledir}/../../include
+datarootdir=${pcfiledir}/../../share
+pkgdatarootdir=${pcfiledir}/../../share
+docdir=
+doxygendocdir=
+
+Name: coal
+Description: Coal, The Collision Detection Library. Previously known as HPP-FCL, fork of FCL -- The Flexible Collision Library
+URL: https://github.com/coal-library/coal
+Version: 3.0.3
+Requires: eigen3 >= 3.0.0
+Conflicts: 
+Libs: -L${libdir} -lcoal.lib 
+Libs.private: 
+Cflags:  -I${includedir}
+
+
