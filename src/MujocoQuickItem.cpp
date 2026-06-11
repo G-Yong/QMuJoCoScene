@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <vector>
 
 namespace {
@@ -131,7 +132,13 @@ MujocoQuickItem::MujocoQuickItem(QQuickItem* parent)
     setActiveFocusOnTab(true);
 }
 
-MujocoQuickItem::~MujocoQuickItem() { closeScene(); }
+MujocoQuickItem::~MujocoQuickItem() {
+    // 若本实例仍持有外部窄相位接入，先恢复全局碰撞函数表，避免 closeScene
+    // 之后留下指向已析构实例的全局回调。
+    if (s_narrowPhaseHost == this)
+        setExternalNarrowPhase(nullptr, nullptr);
+    closeScene();
+}
 
 QQuickFramebufferObject::Renderer* MujocoQuickItem::createRenderer() const {
     return new MujocoFboRenderer();
@@ -1644,8 +1651,139 @@ BodyMeshData MujocoQuickItem::bodyCollisionMesh(int bodyId) const
 }
 
 // ---------------------------------------------------------------------------
-// 接触快照构建：在 sim.mtx 锁内调用，读取当前帧所有接触并转成 ContactInfo 列表。
+// 外部窄相位碰撞接入
 // ---------------------------------------------------------------------------
+MujocoQuickItem* MujocoQuickItem::s_narrowPhaseHost   = nullptr;
+void*            MujocoQuickItem::s_origMeshCollisionFn = nullptr;
+
+namespace {
+// 返回 body 的第一个 mesh geom 的 geom id；无则 -1。用于多 geom body 去重：
+// 一个 body 对只在其代表 mesh geom 对上计算一次外部碰撞。
+int firstMeshGeomOfBody(const mjModel* m, int body)
+{
+    if (!m || body < 0 || body >= m->nbody) return -1;
+    const int n   = m->body_geomnum[body];
+    const int adr = m->body_geomadr[body];
+    for (int i = 0; i < n; ++i) {
+        const int g = adr + i;
+        if (g >= 0 && g < m->ngeom && m->geom_type[g] == mjGEOM_MESH)
+            return g;
+    }
+    return -1;
+}
+} // namespace
+
+int MujocoQuickItem::externalMeshCollisionThunk(const mjModel* m, mjData* d,
+                                                mjContact* con, int g1, int g2,
+                                                double margin)
+{
+    MujocoQuickItem* host = s_narrowPhaseHost;
+    auto fallback = [&]() -> int {
+        if (s_origMeshCollisionFn) {
+            auto fn = reinterpret_cast<mjfCollision>(s_origMeshCollisionFn);
+            return fn(m, d, con, g1, g2, margin);
+        }
+        return 0;
+    };
+
+    if (!host || !host->m_extPairFilter || !host->m_extNarrowPhase || !m || !d)
+        return fallback();
+
+    const int b1 = m->geom_bodyid[g1];
+    const int b2 = m->geom_bodyid[g2];
+
+    // 不归外部库接管的 body 对 → 回退到 MuJoCo 原始 mesh 碰撞。
+    if (!host->m_extPairFilter(b1, b2))
+        return fallback();
+
+    // 去重：被接管的 body 对只在代表 mesh geom 对上计算一次，其余几何对返回
+    // 0 个接触（已被代表对覆盖），不再回退到默认碰撞。
+    if (g1 != firstMeshGeomOfBody(m, b1) || g2 != firstMeshGeomOfBody(m, b2))
+        return 0;
+
+    ExternalContactPoint buf[mjMAXCONPAIR];
+    const int produced = host->m_extNarrowPhase(
+        b1, d->xpos + 3 * b1, d->xmat + 9 * b1,
+        b2, d->xpos + 3 * b2, d->xmat + 9 * b2,
+        buf, mjMAXCONPAIR);
+
+    int written = 0;
+    for (int i = 0; i < produced && written < mjMAXCONPAIR; ++i) {
+        // 只注入穿透 / 在 margin 内的接触；分离接触交给求解器无意义。
+        if (buf[i].dist >= margin) continue;
+
+        mjContact& c = con[written];
+        // 近相位碰撞函数只需填 dist / pos / frame；friction / solref / solimp /
+        // dim / geom 等由 MuJoCo 的 mj_collideGeoms 在返回后补全。
+        c.dist   = buf[i].dist;
+        c.pos[0] = buf[i].pos[0];
+        c.pos[1] = buf[i].pos[1];
+        c.pos[2] = buf[i].pos[2];
+
+        // 构造正交接触帧：row0 = 法向（geom[0]→geom[1]），row1/row2 = 切向。
+        mjtNum nrm[3] = { buf[i].normal[0], buf[i].normal[1], buf[i].normal[2] };
+        if (mju_normalize3(nrm) < mjMINVAL) continue; // 退化法向，丢弃
+
+        mjtNum ref[3] = { 1, 0, 0 };
+        if (std::fabs(nrm[0]) > 0.9) { ref[0] = 0; ref[1] = 1; ref[2] = 0; }
+        const mjtNum dot = nrm[0]*ref[0] + nrm[1]*ref[1] + nrm[2]*ref[2];
+        mjtNum t1[3] = { ref[0] - dot*nrm[0], ref[1] - dot*nrm[1], ref[2] - dot*nrm[2] };
+        mju_normalize3(t1);
+        mjtNum t2[3];
+        mju_cross(t2, nrm, t1);
+
+        c.frame[0] = nrm[0]; c.frame[1] = nrm[1]; c.frame[2] = nrm[2];
+        c.frame[3] = t1[0];  c.frame[4] = t1[1];  c.frame[5] = t1[2];
+        c.frame[6] = t2[0];  c.frame[7] = t2[1];  c.frame[8] = t2[2];
+        ++written;
+    }
+    return written;
+}
+
+void MujocoQuickItem::setExternalNarrowPhase(ExternalPairFilter filter,
+                                             ExternalNarrowPhaseFn provider)
+{
+    auto apply = [&]() {
+        if (filter && provider) {
+            m_extPairFilter  = std::move(filter);
+            m_extNarrowPhase = std::move(provider);
+            s_narrowPhaseHost = this;
+            if (!s_origMeshCollisionFn) {
+                s_origMeshCollisionFn =
+                    reinterpret_cast<void*>(mjCOLLISIONFUNC[mjGEOM_MESH][mjGEOM_MESH]);
+                mjCOLLISIONFUNC[mjGEOM_MESH][mjGEOM_MESH] =
+                    reinterpret_cast<mjfCollision>(&MujocoQuickItem::externalMeshCollisionThunk);
+            }
+        } else {
+            // 卸载：恢复原始 mesh 碰撞函数。
+            if (s_origMeshCollisionFn) {
+                mjCOLLISIONFUNC[mjGEOM_MESH][mjGEOM_MESH] =
+                    reinterpret_cast<mjfCollision>(s_origMeshCollisionFn);
+                s_origMeshCollisionFn = nullptr;
+            }
+            m_extPairFilter  = nullptr;
+            m_extNarrowPhase = nullptr;
+            if (s_narrowPhaseHost == this) s_narrowPhaseHost = nullptr;
+        }
+    };
+
+    // 安装/卸载必须与物理线程串行：在 sim.mtx 锁内换入/换出。
+    if (m_sim) {
+        std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+        apply();
+    } else {
+        apply();
+    }
+}
+
+bool MujocoQuickItem::externalNarrowPhaseInstalled() const
+{
+    return s_narrowPhaseHost == this
+        && static_cast<bool>(m_extPairFilter)
+        && static_cast<bool>(m_extNarrowPhase);
+}
+
+
 static QList<ContactInfo> buildContactSnapshot(mjModel* m, mjData* d)
 {
     QList<ContactInfo> result;
