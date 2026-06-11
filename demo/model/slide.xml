@@ -1,0 +1,39 @@
+<mujoco model="EVO25B装配体.SLDASM">
+  <compiler angle="radian"/>
+
+  <visual>
+    <map force="0.1" zfar="100"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global offwidth="2560" offheight="1440" elevation="-20" azimuth="120"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1=".3 .5 .7" rgb2="0.15 0.25 0.35" width="32" height="512"/>
+    <texture name="grid" type="2d" builtin="checker" width="512" height="512" rgb1=".1 .2 .3" rgb2=".2 .3 .4"/>
+    <material name="grid" texture="grid" texrepeat="1 1" texuniform="true" reflectance=".2"/>
+
+    <mesh name="slide" content_type="model/stl" file="meshes/slide.STL"/>
+    <mesh name="ball" content_type="model/stl" file="meshes/ball.STL"/>
+    <mesh name="cube" content_type="model/stl" file="meshes/cube.STL"/>
+  </asset>
+
+  <worldbody>
+    <!-- 地面 -->
+     <!-- 摩擦力参数：滑动摩擦、扭矩摩擦、滚动摩擦 -->
+    <geom name="ground" type="plane" size="5 5 0.05" pos="0 0 0" material="grid" friction="0.1 0.005 0.1"/>
+
+    <light name="spotlight" mode="targetbodycom" target="slide" diffuse=".8 .8 .8" specular="0.3 0.3 0.3" pos="0 -6 4" cutoff="30"/>
+    <light name="top" pos="0 0 2" mode="trackcom"/>
+
+    <body name="slide" pos="0 0 0" euler="0 0 0">
+      <geom type="mesh" rgba="0.79216 0.81961 0.93333 1" mesh="slide" friction="0.1 0.5 0.1" solref="0.005 1" solimp="0.99 0.99 0.001"/>
+    </body>
+
+    <body name="ball" pos="0 0 0.3" euler="0 0 0">
+      <freejoint/>
+      <inertial pos="0 0 0" mass="0.1" diaginertia="0.001 0.001 0.001"/>
+      <geom type="mesh" rgba="0.79216 0.81961 0.93333 1" mesh="ball" friction="0.1 0.5 0.01" solref="0.005 1" solimp="0.99 0.99 0.001"/>
+    </body>
+
+  </worldbody>
+</mujoco>

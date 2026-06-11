@@ -20,6 +20,17 @@ include(../src/qmujocoscene.pri)
 # 源文件 / 资源
 # ----------------------------------------------------------------------------
 SOURCES += \
+    coalcollision.cpp \
     main.cpp
 
 RESOURCES += qml.qrc
+
+HEADERS += \
+    coalcollision.h
+
+
+INCLUDEPATH += $$PWD/../thirdparty/coal/include
+INCLUDEPATH += $$PWD/../thirdparty/eigen3_x64-windows/include/eigen3
+INCLUDEPATH += $$PWD/../thirdparty/boost-math_x64-windows/include
+LIBS += -L$$PWD/../thirdparty/coal/lib -lcoal
+LIBS += -L$$PWD/../thirdparty/bin

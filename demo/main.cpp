@@ -1,4 +1,5 @@
 #include "MujocoQuickItem.h"
+#include "coalcollision.h"
 
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
@@ -103,8 +104,9 @@ int main(int argc, char *argv[])
     view->setResizeMode(QQuickWidget::SizeRootObjectToView);
     // 默认模型路径 —— 改成你自己的路径
     QString filePath;
-    filePath = "../../../../mujoco-3.8.0-windows-x86_64/model/humanoid/humanoid.xml";
+    // filePath = "../../../../mujoco-3.8.0-windows-x86_64/model/humanoid/humanoid.xml";
     // filePath = "../../../../mujoco-3.8.0-windows-x86_64/model/cards/cards.xml";
+    filePath = "../../../model/slide.xml";
     view->engine()->rootContext()->setContextProperty(
         "initialXmlPath",
         filePath);
@@ -135,7 +137,10 @@ int main(int argc, char *argv[])
         });
     }
 
-    QObject::connect(mujoco, &MujocoQuickItem::sceneLoaded, view, [=](const QString& source) {
+    CoalCollision coalCollision;
+    coalCollision.setMujocoItem(mujoco);
+
+    QObject::connect(mujoco, &MujocoQuickItem::sceneLoaded, view, [=, &coalCollision](const QString& source) {
         // 绘制轨迹
         auto tjId = mujoco->addTrajectory(1024,
                               2.0,
@@ -151,7 +156,14 @@ int main(int argc, char *argv[])
             }
         }
         mujoco->setTrajectoryTrackedBody(tjId, bodyId, 0);
+
+
+        coalCollision.setupCoalForLoadedScene();
+        coalCollision.setCoalSecurityMargin(0.00);
+        coalCollision.setCoalNormalFlip(false);
+        coalCollision.addCoalPair("ball", "slide");
      });
+
 
     return app.exec();
 }
