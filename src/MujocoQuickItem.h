@@ -346,6 +346,35 @@ public:
     // 单自由度快捷接口，仅适用于 hinge / slide 关节。
     // 对 free / ball 关节调用会返回 false。
     Q_INVOKABLE bool setJointValue(int index, double value);
+    // 按关节名称设置单自由度值，内部查找 joint index 后调用 setJointValue。
+    // 仅适用于 hinge / slide 关节。
+    Q_INVOKABLE bool setJointValueByName(const QString& name, double value);
+
+    // ------------------------------------------------------------------
+    // 驱动器控制接口
+    // ------------------------------------------------------------------
+    // 仿真运行时（simulationRunning=true），应通过 ctrl 控制驱动器而非直接
+    // 写 qpos。例如 position 伺服：ctrl = 目标关节角(rad)；velocity 伺服：
+    // ctrl = 目标速度。setControl/setControls 在 sim.mtx 锁内直接写入
+    // d->ctrl 并标记 pending 刷新。
+
+    // 返回驱动器数量；场景未加载时返回 0。
+    Q_INVOKABLE int         actuatorCount() const;
+    // 返回第 index 个驱动器的固有属性；index 越界返回空结构。
+    Q_INVOKABLE ActuatorInfo actuatorInfo(int index) const;
+    // 按名称查找驱动器下标（-1 表示未找到）。
+    Q_INVOKABLE int         actuatorIndex(const QString& name) const;
+    // 读取第 index 个驱动器的当前 ctrl 值；场景未加载或越界返回 NaN。
+    Q_INVOKABLE double      control(int index) const;
+    // 设置第 index 个驱动器的 ctrl 值；返回是否成功写入。
+    Q_INVOKABLE bool        setControl(int index, double value);
+    // 按名称设置 ctrl 值；返回是否找到并写入。
+    Q_INVOKABLE bool        setControlByName(const QString& name, double value);
+    // 以 QVariantList 读取全部 ctrl 值。
+    Q_INVOKABLE QVariantList controls() const;
+    // 批量设置 ctrl 值；values 长度须与 actuatorCount() 一致。
+    // 返回是否成功写入（false = 场景未加载或长度不匹配）。
+    Q_INVOKABLE bool        setControls(const QVariantList& values);
 
     Q_INVOKABLE bool toggleSimulationRunning();
     Q_INVOKABLE bool stepSimulationForward();

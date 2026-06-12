@@ -27,9 +27,11 @@
 #include <QDir>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <cmath>
+#include <iterator>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -123,6 +125,7 @@ private:
 MujocoQuickItem::MujocoQuickItem(QQuickItem* parent)
     : QQuickFramebufferObject(parent) {
     qRegisterMetaType<JointInfo>();
+    qRegisterMetaType<ActuatorInfo>();
     qRegisterMetaType<SceneObjectInfo>();
     qRegisterMetaType<ContactInfo>();
     setMirrorVertically(true); // mjr 是 OpenGL bottom-up，Quick 绘制时翻一下
@@ -1922,6 +1925,158 @@ bool MujocoQuickItem::setJointValue(int index, double value)
         int type = sim.m_->jnt_type[index];
         if (type != mjJNT_SLIDE && type != mjJNT_HINGE) return;
         sim.qpos_[sim.m_->jnt_qposadr[index]] = value;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setJointValueByName(const QString& name, double value)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_) return;
+        const int id = mj_name2id(sim.m_, mjOBJ_JOINT, name.toUtf8().constData());
+        if (!isValidIndex(id, static_cast<int>(sim.m_->njnt))) return;
+        int type = sim.m_->jnt_type[id];
+        if (type != mjJNT_SLIDE && type != mjJNT_HINGE) return;
+        sim.qpos_[sim.m_->jnt_qposadr[id]] = value;
+        applied = true;
+    });
+    return applied;
+}
+
+// ---------------------------------------------------------------------------
+// 驱动器控制接口
+// ---------------------------------------------------------------------------
+
+// 把 mjtTrn / mjtGain / mjtBias 转为可读字符串
+static const char* const kTrnTypeName[]  = {"joint", "jointInParent", "sliderCrank", "tendon", "site", "body"};
+static const char* const kGainTypeName[] = {"fixed", "affine", "muscle", "dcmotor", "user"};
+static const char* const kBiasTypeName[] = {"none", "affine", "muscle", "dcmotor", "user"};
+
+int MujocoQuickItem::actuatorCount() const
+{
+    int count = 0;
+    withSimulation([&](const mjModel* m, mjData*) {
+        count = static_cast<int>(m->nu);
+    });
+    return count;
+}
+
+ActuatorInfo MujocoQuickItem::actuatorInfo(int index) const
+{
+    ActuatorInfo result;
+    withSimulation([&](const mjModel* m, mjData*) {
+        if (!isValidIndex(index, static_cast<int>(m->nu))) return;
+
+        const char* rawName = mj_id2name(m, mjOBJ_ACTUATOR, index);
+        result.name = rawName ? QString::fromUtf8(rawName)
+                              : QStringLiteral("actuator_%1").arg(index);
+
+        const int trn = m->actuator_trntype[index];
+        result.trnType = trn;
+        result.trnTypeName = (trn >= 0 && trn < static_cast<int>(std::size(kTrnTypeName)))
+                                 ? QString::fromLatin1(kTrnTypeName[trn])
+                                 : QStringLiteral("unknown");
+
+        const int gn = m->actuator_gaintype[index];
+        result.gainType = gn;
+        result.gainTypeName = (gn >= 0 && gn < static_cast<int>(std::size(kGainTypeName)))
+                                  ? QString::fromLatin1(kGainTypeName[gn])
+                                  : QStringLiteral("unknown");
+
+        const int bs = m->actuator_biastype[index];
+        result.biasType = bs;
+        result.biasTypeName = (bs >= 0 && bs < static_cast<int>(std::size(kBiasTypeName)))
+                                  ? QString::fromLatin1(kBiasTypeName[bs])
+                                  : QStringLiteral("unknown");
+
+        result.ctrlMin  = m->actuator_ctrlrange[2 * index];
+        result.ctrlMax  = m->actuator_ctrlrange[2 * index + 1];
+        result.forceMin = m->actuator_forcerange[2 * index];
+        result.forceMax = m->actuator_forcerange[2 * index + 1];
+        result.gear     = m->actuator_gear[6 * index];
+
+        // 提取关联 joint（通过 transmission 的第一个 id）
+        const int jntId = m->actuator_trnid[2 * index];
+        if (jntId >= 0 && jntId < m->njnt) {
+            result.jointId = jntId;
+            const char* jntName = mj_id2name(m, mjOBJ_JOINT, jntId);
+            result.jointName = jntName ? QString::fromUtf8(jntName)
+                                       : QStringLiteral("joint_%1").arg(jntId);
+        }
+    });
+    return result;
+}
+
+int MujocoQuickItem::actuatorIndex(const QString& name) const
+{
+    int idx = -1;
+    withSimulation([&](const mjModel* m, mjData*) {
+        const int id = mj_name2id(m, mjOBJ_ACTUATOR, name.toUtf8().constData());
+        idx = (id >= 0 && id < static_cast<int>(m->nu)) ? id : -1;
+    });
+    return idx;
+}
+
+double MujocoQuickItem::control(int index) const
+{
+    double val = std::numeric_limits<double>::quiet_NaN();
+    withSimulation([&](const mjModel* m, mjData* d) {
+        if (!isValidIndex(index, static_cast<int>(m->nu))) return;
+        val = d->ctrl[index];
+    });
+    return val;
+}
+
+bool MujocoQuickItem::setControl(int index, double value)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_) return;
+        if (!isValidIndex(index, static_cast<int>(sim.m_->nu))) return;
+        sim.ctrl_[index] = value;
+        sim.pending_.ui_update_simulation = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setControlByName(const QString& name, double value)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_) return;
+        const int id = mj_name2id(sim.m_, mjOBJ_ACTUATOR, name.toUtf8().constData());
+        if (!isValidIndex(id, static_cast<int>(sim.m_->nu))) return;
+        sim.ctrl_[id] = value;
+        sim.pending_.ui_update_simulation = true;
+        applied = true;
+    });
+    return applied;
+}
+
+QVariantList MujocoQuickItem::controls() const
+{
+    QVariantList result;
+    withSimulation([&](const mjModel* m, mjData* d) {
+        result.reserve(static_cast<int>(m->nu));
+        for (int i = 0; i < static_cast<int>(m->nu); ++i)
+            result.append(d->ctrl[i]);
+    });
+    return result;
+}
+
+bool MujocoQuickItem::setControls(const QVariantList& values)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_) return;
+        const int nu = static_cast<int>(sim.m_->nu);
+        if (values.size() != nu) return;
+        for (int i = 0; i < nu; ++i)
+            sim.ctrl_[i] = values[i].toDouble();
+        sim.pending_.ui_update_simulation = true;
         applied = true;
     });
     return applied;

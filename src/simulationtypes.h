@@ -41,6 +41,71 @@ public:
 Q_DECLARE_METATYPE(JointInfo)
 
 // ---------------------------------------------------------------------------
+// ActuatorInfo — 驱动器固有属性描述。支持 Q_GADGET，可在 QML 中直接读取。
+//
+// trnType 对应 mjtTrn（传输类型）：
+//   0 = joint  (作用在关节上，如位置/速度伺服)
+//   1 = jointInParent
+//   2 = sliderCrank
+//   3 = tendon
+//   4 = site
+//   5 = body   (adhesion)
+//
+// gainType 对应 mjtGain（增益类型）：
+//   0 = fixed    (简单力/力矩输入)
+//   1 = affine   (位置/速度相关增益)
+//   2 = muscle
+//   3 = dcmotor
+//   4 = user
+//
+// biasType 对应 mjtBias（偏置类型）：
+//   0 = none     (无偏置)
+//   1 = affine   (kp*kv 伺服，如 position/velocity actuator)
+//   2 = muscle
+//   3 = dcmotor
+//   4 = user
+//
+// ctrlRange：控制值范围（XML ctrlrange）。
+// forceRange：力值范围（XML forcerange）。
+// gear[0]：传动比第一分量。
+// jointId：关联的 joint id（-1 表示无关联 joint）。
+// jointName：关联的 joint 名称。伺服类 actuator 通过 trnid[0] 绑定 joint。
+// ---------------------------------------------------------------------------
+struct ActuatorInfo {
+    Q_GADGET
+    Q_PROPERTY(QString name         MEMBER name         CONSTANT)
+    Q_PROPERTY(int     trnType      MEMBER trnType      CONSTANT)
+    Q_PROPERTY(QString trnTypeName  MEMBER trnTypeName  CONSTANT)
+    Q_PROPERTY(int     gainType     MEMBER gainType     CONSTANT)
+    Q_PROPERTY(QString gainTypeName MEMBER gainTypeName CONSTANT)
+    Q_PROPERTY(int     biasType     MEMBER biasType     CONSTANT)
+    Q_PROPERTY(QString biasTypeName MEMBER biasTypeName CONSTANT)
+    Q_PROPERTY(int     jointId      MEMBER jointId      CONSTANT)
+    Q_PROPERTY(QString jointName    MEMBER jointName    CONSTANT)
+    Q_PROPERTY(double  ctrlMin      MEMBER ctrlMin      CONSTANT)
+    Q_PROPERTY(double  ctrlMax      MEMBER ctrlMax      CONSTANT)
+    Q_PROPERTY(double  forceMin     MEMBER forceMin     CONSTANT)
+    Q_PROPERTY(double  forceMax     MEMBER forceMax     CONSTANT)
+    Q_PROPERTY(double  gear         MEMBER gear         CONSTANT)
+public:
+    QString name;
+    int     trnType      = 0;
+    QString trnTypeName;
+    int     gainType     = 0;
+    QString gainTypeName;
+    int     biasType     = 0;
+    QString biasTypeName;
+    int     jointId      = -1;
+    QString jointName;
+    double  ctrlMin      = 0.0;
+    double  ctrlMax      = 0.0;
+    double  forceMin     = 0.0;
+    double  forceMax     = 0.0;
+    double  gear         = 0.0;
+};
+Q_DECLARE_METATYPE(ActuatorInfo)
+
+// ---------------------------------------------------------------------------
 // SceneObjectInfo — 场景 body 的基础属性快照。objectCount()/objectInfo()
 // 使用与 MuJoCo 一致的 body id，包含 world body (body id 0)。
 //
