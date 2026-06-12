@@ -61,7 +61,7 @@ public:
     QVector<CoalCollisionResult> detect();
 
     // 仅对单个 body 对执行碰撞检测（两者须已 registerBody，并已通过 updatePose
-    // 设置好世界位姿）。供把 coal 接入 MuJoCo 求解器的窄相位回调按需调用，避免
+    // 设置好世界位姿）。供把 coal 接入 MuJoCo 求解器的窄阶段回调按需调用，避免
     // 每次都遍历全部 pair。a/b 任一未注册时返回 colliding=false 的空结果。
     CoalCollisionResult detectPair(const QString& a, const QString& b);
 
@@ -111,7 +111,7 @@ private:
     // 重置 coal 运行态。restoreModelState=true 时按记录恢复被改动的 body 颜色
     //（仅当 body id 仍有效，如同场景内切换模式时）；场景重载时传 false。
     void teardownCoalState(bool restoreModelState);
-    // 按 m_coalPairNames 重新注册网格、加入检测对并安装窄相位。需 m_coalSceneReady。
+    // 按 m_coalPairNames 重新注册网格、加入检测对并安装窄阶段。需 m_coalSceneReady。
     void rebuildCoalAndActivate();
 
 private:
@@ -122,7 +122,7 @@ private:
     QVector<QPair<QString, QString>> m_coalPairNames;   // 用户请求的碰撞对（按名字）
     QHash<QString, int>  m_coalBodyId;                  // 已注册 body 名 → bodyId
     bool m_coalSceneReady = false;
-    bool m_coalPhysicsInstalled = false;    // 当前是否已安装窄相位回调
+    bool m_coalPhysicsInstalled = false;    // 当前是否已安装窄阶段回调
     bool m_coalNormalFlip = false;          // 法向取反（见 setCoalNormalFlip）
     QHash<int, QString> m_coalBodyName;     // bodyId → name 反查（provider 用）
     QSet<QPair<int, int>> m_coalPhysicsPairs; // 接管的 body 对（归一化 min,max)

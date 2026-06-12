@@ -133,7 +133,7 @@ MujocoQuickItem::MujocoQuickItem(QQuickItem* parent)
 }
 
 MujocoQuickItem::~MujocoQuickItem() {
-    // 若本实例仍持有外部窄相位接入，先恢复全局碰撞函数表，避免 closeScene
+    // 若本实例仍持有外部窄阶段接入，先恢复全局碰撞函数表，避免 closeScene
     // 之后留下指向已析构实例的全局回调。
     if (s_narrowPhaseHost == this)
         setExternalNarrowPhase(nullptr, nullptr);
@@ -1651,7 +1651,7 @@ BodyMeshData MujocoQuickItem::bodyCollisionMesh(int bodyId) const
 }
 
 // ---------------------------------------------------------------------------
-// 外部窄相位碰撞接入
+// 外部窄阶段碰撞接入
 // ---------------------------------------------------------------------------
 MujocoQuickItem* MujocoQuickItem::s_narrowPhaseHost   = nullptr;
 void*            MujocoQuickItem::s_origMeshCollisionFn = nullptr;

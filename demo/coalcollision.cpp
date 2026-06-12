@@ -45,7 +45,7 @@ void CoalCollision::addCoalPair(const QString& bodyA, const QString& bodyB)
         registerCoalBody(bodyB);
         if (m_coal->hasBody(bodyA) && m_coal->hasBody(bodyB))
             m_coal->addPair(bodyA, bodyB);
-        // 重建窄相位（新 pair 需要加入 filter）
+        // 重建窄阶段（新 pair 需要加入 filter）
         uninstallCoalNarrowPhase();
         setupCoalPhysics();
     }
@@ -67,7 +67,7 @@ void CoalCollision::setCoalNormalFlip(bool flip)
     if (m_coalNormalFlip == flip)
         return;
     m_coalNormalFlip = flip;
-    // 重装窄相位以让新的法向符号生效。
+    // 重装窄阶段以让新的法向符号生效。
     if (m_coalPhysicsInstalled) {
         uninstallCoalNarrowPhase();
         setupCoalPhysics();
@@ -85,7 +85,7 @@ void CoalCollision::setupCoalForLoadedScene()
     teardownCoalState(false);
     m_coalSceneReady = true;
 
-    // 重新注册所有用户请求的碰撞对并安装窄相位。
+    // 重新注册所有用户请求的碰撞对并安装窄阶段。
     rebuildCoalAndActivate();
 }
 
@@ -98,7 +98,7 @@ void CoalCollision::rebuildCoalAndActivate()
             m_coal->addPair(pair.first, pair.second);
     }
 
-    // 直接安装窄相位（唯一模式）
+    // 直接安装窄阶段（唯一模式）
     setupCoalPhysics();
 }
 
@@ -177,7 +177,7 @@ void CoalCollision::installCoalNarrowPhase()
             return 0;
 
         // ---------------------------------------------------------------
-        // 接触归并（关键）：coal 的 mesh×mesh 窄相位会为"每一对相交三角形"
+        // 接触归并（关键）：coal 的 mesh×mesh 窄阶段会为"每一对相交三角形"
         // 各产生一个接触点。对一个三角化的小球落在弯曲滑道上的情形，会同时得到
         // 几十个接触点，而且：
         //   · 每个点的法向是各自三角形的法向，逐面抖动、方向发散；

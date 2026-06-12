@@ -282,7 +282,7 @@ public:
     Q_INVOKABLE BodyMeshData bodyCollisionMesh(int bodyId) const;
 
     // ------------------------------------------------------------------
-    // 外部窄相位碰撞接入（external narrow-phase collision）
+    // 外部窄阶段碰撞接入（external narrow-phase collision）
     //
     // 让外部碰撞库（如 coal / hpp-fcl）的精确碰撞结果真正进入 MuJoCo 的约束
     // 求解器，从而产生真实接触力、参与动力学交互（而非仅做旁路可视化）。
@@ -298,19 +298,19 @@ public:
     // 线程：filter / provider 在 MuJoCo 物理线程内、持 sim.mtx 锁时被调用，必须
     // 轻量且不得再次加锁 sim.mtx。安装/卸载本身也在 sim.mtx 锁内完成，与物理
     // 线程串行化。注意 mjCOLLISIONFUNC 是进程级全局表，假定同时只有一个
-    // MujocoQuickItem 安装外部窄相位（单实例）。
+    // MujocoQuickItem 安装外部窄阶段（单实例）。
     //
     // 限制：当前仅拦截 mesh×mesh；被接管的 body 应为纯 mesh geom。
     // ------------------------------------------------------------------
 
-    // 外部窄相位产生的单个接触点（世界坐标）。
+    // 外部窄阶段产生的单个接触点（世界坐标）。
     struct ExternalContactPoint {
         double pos[3];     // 世界坐标接触点
         double normal[3];  // 单位法向，约定从 body1 指向 body2
         double dist;       // 沿法向带符号距离；负值表示穿透
     };
 
-    // 判定一对 body 是否由外部窄相位接管（顺序无关，物理线程调用，须轻量）。
+    // 判定一对 body 是否由外部窄阶段接管（顺序无关，物理线程调用，须轻量）。
     using ExternalPairFilter = std::function<bool(int body1, int body2)>;
 
     // 计算一对 body 的精确接触（物理线程调用）。给定两 body 的世界位姿
@@ -321,7 +321,7 @@ public:
         int body2, const double xpos2[3], const double xmat2[9],
         ExternalContactPoint* out, int maxOut)>;
 
-    // 安装/替换外部窄相位接入。filter 与 provider 必须同时有效；任一为空则
+    // 安装/替换外部窄阶段接入。filter 与 provider 必须同时有效；任一为空则
     // 卸载并恢复 MuJoCo 默认 mesh 碰撞。线程安全。
     void setExternalNarrowPhase(ExternalPairFilter filter,
                                 ExternalNarrowPhaseFn provider);
@@ -619,7 +619,7 @@ private:
     const TrajectoryState* findTrajectory(int trajectoryId) const;
 
     // ------------------------------------------------------------------
-    // 外部窄相位碰撞接入状态
+    // 外部窄阶段碰撞接入状态
     // ------------------------------------------------------------------
     // filter / provider 由 setExternalNarrowPhase 写入；安装/卸载受 sim.mtx
     // 保护，安装期间仅由物理线程读取，未卸载前不可修改。
@@ -630,7 +630,7 @@ private:
     static int externalMeshCollisionThunk(const mjModel* m, mjData* d,
                                           mjContact* con, int g1, int g2,
                                           double margin);
-    // 当前安装了外部窄相位的实例（mjCOLLISIONFUNC 是全局表，假定单实例）。
+    // 当前安装了外部窄阶段的实例（mjCOLLISIONFUNC 是全局表，假定单实例）。
     static MujocoQuickItem* s_narrowPhaseHost;
     // 被替换前的原始 mesh×mesh 碰撞函数（mjfCollision），卸载时恢复。
     static void*            s_origMeshCollisionFn;
