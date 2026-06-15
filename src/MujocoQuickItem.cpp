@@ -2544,15 +2544,23 @@ void MujocoQuickItem::onFrameRendered() {
 
     // 在锁内采样当前帧接触信息（sim.mtx 是 recursive_mutex，渲染线程可能已持锁）
     QList<ContactInfo> contacts;
+    bool simRunChanged = false;
     if (m_sim) {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
         if (m_sim->m_ && m_sim->d_) {
             contacts = buildContactSnapshot(m_sim->m_, m_sim->d_);
             sampleTrackedTrajectoriesLocked(m_sim->m_, m_sim->d_);
         }
+        // 键盘/UI 可能直接修改了 sim.run（例如空格键），同步回 m_simulationRunning
+        const bool simRunning = (m_sim->run != 0);
+        if (m_simulationRunning.load() != simRunning) {
+            m_simulationRunning.store(simRunning);
+            simRunChanged = true;
+        }
     }
 
-    QMetaObject::invokeMethod(this, [this, statusText, contacts = std::move(contacts)] {
+    QMetaObject::invokeMethod(this, [this, statusText, contacts = std::move(contacts), simRunChanged] {
+        if (simRunChanged) emit simulationRunningChanged();
         if (m_statusOverlayText != statusText) {
             m_statusOverlayText = statusText;
             emit statusOverlayTextChanged();
