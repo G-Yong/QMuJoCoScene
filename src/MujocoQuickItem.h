@@ -260,6 +260,14 @@ public:
     Q_INVOKABLE bool setObjectPose(int bodyId,
                                    const QVector3D& position,
                                    const QQuaternion& orientation);
+
+    // 直接写 model->body_pos / body_quat（局部坐标，即 XML 的 pos/quat 属性），
+    // 不做任何世界 ↔ 局部坐标变换。适用于静态 body（无 free joint）；
+    // free joint body 与 setObjectPosition / setObjectPose 行为相同。
+    Q_INVOKABLE bool setObjectLocalPosition(int bodyId, const QVector3D& localPosition);
+    Q_INVOKABLE bool setObjectLocalPose(int bodyId,
+                                        const QVector3D& localPosition,
+                                        const QQuaternion& localOrientation);
     // 按 MuJoCo body id 设置其直属 geoms 的绝对 size 参数。
     Q_INVOKABLE bool setObjectSize(int bodyId, const QVector3D& size);
     // 按 MuJoCo body id 对其直属 geoms 的 size 参数做乘法缩放。

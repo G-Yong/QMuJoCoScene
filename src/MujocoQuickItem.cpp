@@ -1501,6 +1501,67 @@ bool MujocoQuickItem::setObjectPose(int bodyId,
     return applied;
 }
 
+bool MujocoQuickItem::setObjectLocalPosition(int bodyId, const QVector3D& localPosition)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_ || bodyId < 0 || bodyId >= sim.m_->nbody) return;
+        const int freeJointId = freeJointIndexForBody(sim.m_, bodyId);
+        if (freeJointId >= 0) {
+            // free joint body：仍走 qpos（free joint 的 pos 即局部于世界）
+            setFreeJointPosition(sim.m_, sim.d_,
+                                 sim.qpos_, sim.qpos_prev_,
+                                 freeJointId, localPosition);
+        } else {
+            // 静态 body：直接写 model->body_pos，等同于 XML 的 pos 属性
+            mjtNum* bodyPos = sim.m_->body_pos + 3 * bodyId;
+            bodyPos[0] = static_cast<mjtNum>(localPosition.x());
+            bodyPos[1] = static_cast<mjtNum>(localPosition.y());
+            bodyPos[2] = static_cast<mjtNum>(localPosition.z());
+            mj_setConst(sim.m_, sim.d_);
+        }
+        mj_forward(sim.m_, sim.d_);
+        markUiRefresh(sim);
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setObjectLocalPose(int bodyId,
+                                         const QVector3D& localPosition,
+                                         const QQuaternion& localOrientation)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_ || bodyId < 0 || bodyId >= sim.m_->nbody) return;
+        const int freeJointId = freeJointIndexForBody(sim.m_, bodyId);
+        if (freeJointId >= 0) {
+            setFreeJointPosition(sim.m_, sim.d_,
+                                 sim.qpos_, sim.qpos_prev_,
+                                 freeJointId, localPosition);
+            setFreeJointOrientation(sim.m_, sim.d_,
+                                    sim.qpos_, sim.qpos_prev_,
+                                    freeJointId, localOrientation);
+        } else {
+            // 直接写 model->body_pos / body_quat（XML pos/quat 属性语义）
+            mjtNum* bodyPos = sim.m_->body_pos + 3 * bodyId;
+            bodyPos[0] = static_cast<mjtNum>(localPosition.x());
+            bodyPos[1] = static_cast<mjtNum>(localPosition.y());
+            bodyPos[2] = static_cast<mjtNum>(localPosition.z());
+            mjtNum localQuat[4];
+            quaternionToMj(localOrientation, localQuat);
+            mju_normalize4(localQuat);
+            mjtNum* bodyQuat = sim.m_->body_quat + 4 * bodyId;
+            for (int i = 0; i < 4; ++i) bodyQuat[i] = localQuat[i];
+            mj_setConst(sim.m_, sim.d_);
+        }
+        mj_forward(sim.m_, sim.d_);
+        markUiRefresh(sim);
+        applied = true;
+    });
+    return applied;
+}
+
 bool MujocoQuickItem::setObjectSize(int bodyId, const QVector3D& size)
 {
     bool applied = false;
