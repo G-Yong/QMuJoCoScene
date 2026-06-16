@@ -1,10 +1,13 @@
 <mujoco model="EVO25B装配体.SLDASM">
   <compiler angle="radian"/>
 
+  <size nconmax="30000" njmax="10" nuserdata="10"/>
+
   <visual>
     <map force="0.1" zfar="100"/>
     <rgba haze="0.15 0.25 0.35 1"/>
     <global offwidth="2560" offheight="1440" elevation="-20" azimuth="120"/>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
   </visual>
 
   <asset>
@@ -31,7 +34,7 @@
 
     <flexcomp type="mesh" file="meshes/slide.STL" pos="0.5 0 0" dim="2" euler="0 0 0" rigid="true"
               radius=".001" rgba="0 .7 .7 1" mass=".05" name="rigidBody" dof="radial" scale="1 1 1">
-              <contact friction="0.1 0.5 0.1" selfcollide="none" internal="false"/>
+      <contact friction="0.1 0.5 0.1" selfcollide="none" internal="false"/>
     </flexcomp>
 
     <body name="ball" pos="0 0 0.3" euler="0 0 0">
