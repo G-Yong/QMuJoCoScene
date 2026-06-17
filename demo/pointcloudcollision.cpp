@@ -1,0 +1,372 @@
+#include "pointcloudcollision.h"
+
+#include <mujoco/mujoco.h>
+
+#include <coal/fwd.hh>
+#include <coal/data_types.h>
+#include <coal/collision.h>
+#include <coal/collision_data.h>
+#include <coal/collision_object.h>
+#include <coal/shape/geometric_shapes.h>
+#include <coal/BV/OBBRSS.h>
+#include <coal/BVH/BVH_model.h>
+#include <coal/math/transform.h>
+
+#include <QHash>
+#include <QVariant>
+#include <QVariantList>
+#include <QDebug>
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
+namespace {
+using MeshModel = coal::BVHModel<coal::OBBRSS>;
+
+// 一个参与碰撞的机器人 body 在 coal 里的表示。
+struct BodyEntry {
+    int                                    bodyId = -1;
+    std::shared_ptr<MeshModel>             model;   // body 局部坐标三角网格
+    std::shared_ptr<coal::CollisionObject> object;  // 每帧更新世界位姿
+    double                                 boundRadius = 0.0; // 局部包围球半径，用于粗筛
+};
+} // namespace
+
+struct PointCloudCollision::Impl {
+    MujocoQuickItem* item = nullptr;
+
+    QVector<QVector3D> points;          // 点云（世界坐标）
+    double             radius = 0.01;   // 每点半径（coal 碰撞 + 渲染）
+
+    // 每个点一个 coal Sphere 碰撞对象（位姿固定，body 动时只移动 body）。
+    std::shared_ptr<coal::Sphere>                       pointShape;
+    std::vector<std::shared_ptr<coal::CollisionObject>> pointObjects;
+
+    QStringList               bodyNames;   // 用户请求的碰撞 body
+    QHash<QString, BodyEntry> bodies;      // 已注册（含 coal 网格）的 body
+
+    double k = 3000.0;   // 刚度
+    double c = 30.0;     // 阻尼
+    bool   flip = false; // 法向取反兜底
+
+    QVector4D baseColor {0.2f, 0.8f, 1.0f, 1.0f};
+    QVector4D hitColor  {1.0f, 0.2f, 0.15f, 1.0f};
+
+    int cloudId = -1;    // MujocoQuickItem 里的点云 id
+};
+
+PointCloudCollision::PointCloudCollision(QObject* parent)
+    : QObject(parent), d(new Impl)
+{
+    d->pointShape = std::make_shared<coal::Sphere>(coal::Scalar(d->radius));
+}
+
+PointCloudCollision::~PointCloudCollision() = default;
+
+void PointCloudCollision::setMujocoItem(MujocoQuickItem* item)
+{
+    d->item = item;
+}
+
+// ---------------------------------------------------------------------------
+// 点云数据 / 渲染
+// ---------------------------------------------------------------------------
+
+void PointCloudCollision::setPoints(const QVector<QVector3D>& worldPoints)
+{
+    d->points = worldPoints;
+    rebuildCoalPoints();
+
+    if (!d->item)
+        return;
+
+    // 渲染：首次 addPointCloud，之后 updatePointCloudPoints。
+    QVariantList list;
+    list.reserve(d->points.size());
+    for (const QVector3D& p : d->points)
+        list.append(QVariant::fromValue(p));
+
+    if (d->cloudId < 0) {
+        d->cloudId = d->item->addPointCloud(list,
+                                            static_cast<float>(d->radius),
+                                            MujocoQuickItem::PointStyleSphere,
+                                            d->baseColor);
+    } else {
+        d->item->updatePointCloudPoints(d->cloudId, list);
+    }
+}
+
+int PointCloudCollision::pointCount() const
+{
+    return d->points.size();
+}
+
+void PointCloudCollision::setPointRadius(double radius)
+{
+    if (radius <= 0.0) radius = 0.01;
+    d->radius = radius;
+    // coal 球是共享形状，半径变了要重建（连带每点对象引用新形状）。
+    d->pointShape = std::make_shared<coal::Sphere>(coal::Scalar(d->radius));
+    rebuildCoalPoints();
+    if (d->item && d->cloudId >= 0)
+        d->item->setPointCloudPointSize(d->cloudId, static_cast<float>(d->radius));
+}
+
+void PointCloudCollision::rebuildCoalPoints()
+{
+    d->pointObjects.clear();
+    d->pointObjects.reserve(d->points.size());
+    for (const QVector3D& p : d->points) {
+        coal::Transform3s tf;
+        tf.setTranslation(coal::Vec3s(coal::Scalar(p.x()),
+                                      coal::Scalar(p.y()),
+                                      coal::Scalar(p.z())));
+        auto obj = std::make_shared<coal::CollisionObject>(d->pointShape, tf);
+        obj->computeAABB();
+        d->pointObjects.push_back(std::move(obj));
+    }
+}
+
+void PointCloudCollision::setStiffness(double k) { d->k = k; }
+void PointCloudCollision::setDamping(double c)   { d->c = c; }
+void PointCloudCollision::setNormalFlip(bool flip) { d->flip = flip; }
+void PointCloudCollision::setBaseColor(const QVector4D& rgba) { d->baseColor = rgba; }
+void PointCloudCollision::setHitColor(const QVector4D& rgba)  { d->hitColor = rgba; }
+
+// ---------------------------------------------------------------------------
+// 碰撞 body 注册（coal 网格）
+// ---------------------------------------------------------------------------
+
+void PointCloudCollision::addCollisionBody(const QString& bodyName)
+{
+    if (bodyName.isEmpty() || d->bodyNames.contains(bodyName))
+        return;
+    d->bodyNames.append(bodyName);
+    // 若场景已就绪则立即注册网格。
+    if (d->item)
+        registerBodyMesh(bodyName);
+}
+
+void PointCloudCollision::clearCollisionBodies()
+{
+    d->bodyNames.clear();
+    d->bodies.clear();
+}
+
+int PointCloudCollision::findBodyId(const QString& name) const
+{
+    if (!d->item) return -1;
+    const int count = d->item->objectCount();
+    for (int i = 0; i < count; ++i) {
+        if (d->item->objectInfo(i).name == name)
+            return i;
+    }
+    return -1;
+}
+
+void PointCloudCollision::registerBodyMesh(const QString& name)
+{
+    if (!d->item || d->bodies.contains(name))
+        return;
+    const int bodyId = findBodyId(name);
+    if (bodyId < 0) {
+        qWarning() << "[pointcloud] body not found in scene:" << name;
+        return;
+    }
+    const BodyMeshData mesh = d->item->bodyCollisionMesh(bodyId);
+    if (!mesh.valid || mesh.vertices.isEmpty() || mesh.indices.isEmpty()) {
+        qWarning() << "[pointcloud] body has no triangle mesh geom:" << name;
+        return;
+    }
+
+    std::vector<coal::Vec3s> ps;
+    ps.reserve(mesh.vertices.size());
+    for (const QVector3D& v : mesh.vertices)
+        ps.emplace_back(coal::Scalar(v.x()), coal::Scalar(v.y()), coal::Scalar(v.z()));
+
+    std::vector<coal::Triangle32> ts;
+    ts.reserve(mesh.indices.size() / 3);
+    const int vertexCount = mesh.vertices.size();
+    for (int i = 0; i + 2 < mesh.indices.size(); i += 3) {
+        const int a = mesh.indices[i];
+        const int b = mesh.indices[i + 1];
+        const int cc = mesh.indices[i + 2];
+        if (a < 0 || b < 0 || cc < 0 ||
+            a >= vertexCount || b >= vertexCount || cc >= vertexCount)
+            continue;
+        ts.emplace_back(static_cast<std::uint32_t>(a),
+                        static_cast<std::uint32_t>(b),
+                        static_cast<std::uint32_t>(cc));
+    }
+    if (ts.empty()) {
+        qWarning() << "[pointcloud] body has no valid triangles:" << name;
+        return;
+    }
+
+    auto model = std::make_shared<MeshModel>();
+    model->beginModel(static_cast<unsigned int>(ts.size()),
+                      static_cast<unsigned int>(ps.size()));
+    model->addSubModel(ps, ts);
+    model->endModel();
+    model->computeLocalAABB();
+
+    BodyEntry entry;
+    entry.bodyId      = bodyId;
+    entry.model       = model;
+    entry.object      = std::make_shared<coal::CollisionObject>(model, coal::Transform3s::Identity());
+    entry.boundRadius = static_cast<double>(model->aabb_radius);
+
+    d->bodies.insert(name, std::move(entry));
+    qDebug() << "[pointcloud] registered body:" << name
+             << "verts" << mesh.vertices.size()
+             << "tris" << (mesh.indices.size() / 3);
+}
+
+void PointCloudCollision::setupForLoadedScene()
+{
+    // 场景切换：旧 bodyId 失效，重建注册。
+    d->bodies.clear();
+    for (const QString& name : d->bodyNames)
+        registerBodyMesh(name);
+
+    // 确保点云在新场景里渲染（cloudId 在 closeScene 后已失效）。
+    d->cloudId = -1;
+    if (!d->points.isEmpty())
+        setPoints(d->points);
+}
+
+// ---------------------------------------------------------------------------
+// 每帧：碰撞检测 + 注入惩罚力
+// ---------------------------------------------------------------------------
+
+void PointCloudCollision::update()
+{
+    if (!d->item || d->points.isEmpty() || d->bodies.isEmpty())
+        return;
+
+    QVector<unsigned char> hitFlags(d->points.size(), 0);
+
+    coal::CollisionRequest request;
+    request.enable_contact   = true;
+    request.num_max_contacts = 4;
+
+    const double sign = d->flip ? -1.0 : 1.0;
+
+    d->item->withMutableSimulation([&](mjModel* m, mjData* dat) {
+        for (auto it = d->bodies.begin(); it != d->bodies.end(); ++it) {
+            BodyEntry& be = it.value();
+            if (be.bodyId < 0 || be.bodyId >= m->nbody || !be.object)
+                continue;
+
+            // 1) body 当前世界位姿 → 同步给 coal。
+            const mjtNum* xp = dat->xpos + 3 * be.bodyId;   // 世界位置
+            const mjtNum* xm = dat->xmat + 9 * be.bodyId;   // row-major 3x3
+            coal::Matrix3s R;
+            for (int r = 0; r < 3; ++r)
+                for (int cidx = 0; cidx < 3; ++cidx)
+                    R(r, cidx) = coal::Scalar(xm[3 * r + cidx]);
+            coal::Transform3s tf;
+            tf.setRotation(R);
+            tf.setTranslation(coal::Vec3s(coal::Scalar(xp[0]),
+                                          coal::Scalar(xp[1]),
+                                          coal::Scalar(xp[2])));
+            be.object->setTransform(tf);
+            be.object->computeAABB();
+
+            // body 质心（施力点 / 力臂基准）与世界线速度（阻尼用）。
+            const mjtNum* com = dat->xipos + 3 * be.bodyId;
+            mjtNum vel6[6] = {0};
+            mj_objectVelocity(m, dat, mjOBJ_BODY, be.bodyId, vel6, /*flg_local=*/0);
+            const QVector3D vLin(static_cast<float>(vel6[3]),
+                                 static_cast<float>(vel6[4]),
+                                 static_cast<float>(vel6[5]));
+            const QVector3D bodyPos(static_cast<float>(xp[0]),
+                                    static_cast<float>(xp[1]),
+                                    static_cast<float>(xp[2]));
+
+            // 2) 逐点碰撞，累加力 / 力矩。
+            QVector3D force(0, 0, 0);
+            QVector3D torque(0, 0, 0);
+            const double cullDist = be.boundRadius + d->radius + 0.02; // 粗筛半径
+
+            for (int i = 0; i < d->points.size(); ++i) {
+                // 粗筛：离 body 中心太远的点直接跳过（避免 N 次精确碰撞）。
+                if ((d->points[i] - bodyPos).length() > static_cast<float>(cullDist))
+                    continue;
+
+                coal::CollisionResult res;
+                // o1 = body 网格，o2 = 点球；coal 法向约定 o1→o2（body→point）。
+                coal::collide(be.object.get(), d->pointObjects[i].get(), request, res);
+                if (!res.isCollision())
+                    continue;
+
+                hitFlags[i] = 1;
+
+                // 取穿透最深的接触点。
+                const std::size_t n = res.numContacts();
+                int deepest = -1;
+                double bestDepth = 0.0; // coal penetration_depth：穿透时为负
+                for (std::size_t cIdx = 0; cIdx < n; ++cIdx) {
+                    const coal::Contact& ct = res.getContact(int(cIdx));
+                    if (deepest < 0 || ct.penetration_depth < bestDepth) {
+                        bestDepth = ct.penetration_depth;
+                        deepest   = int(cIdx);
+                    }
+                }
+                if (deepest < 0)
+                    continue;
+
+                const coal::Contact& ct = res.getContact(deepest);
+                const double overlap = std::max(0.0, -static_cast<double>(ct.penetration_depth));
+                if (overlap <= 0.0)
+                    continue;
+
+                // 推离方向：coal 法向是 body→point，把 body 推离点即沿 -normal。
+                QVector3D nrm(static_cast<float>(ct.normal.x()),
+                              static_cast<float>(ct.normal.y()),
+                              static_cast<float>(ct.normal.z()));
+                if (nrm.lengthSquared() < 1e-12f)
+                    continue;
+                nrm.normalize();
+                QVector3D pushDir = nrm * static_cast<float>(-sign);
+
+                // 弹簧-阻尼，且只推不拉：F = max(0, k*overlap - c*(v·pushDir)) * pushDir
+                const double vAlong = QVector3D::dotProduct(vLin, pushDir);
+                const double fMag = std::max(0.0, d->k * overlap - d->c * vAlong);
+                if (fMag <= 0.0)
+                    continue;
+                const QVector3D F = pushDir * static_cast<float>(fMag);
+
+                force += F;
+                // 力矩 = (接触点 - 质心) × F，让物体在偏心接触时也能正确转动。
+                const QVector3D cp(static_cast<float>(ct.pos.x()),
+                                   static_cast<float>(ct.pos.y()),
+                                   static_cast<float>(ct.pos.z()));
+                const QVector3D arm = cp - QVector3D(static_cast<float>(com[0]),
+                                                     static_cast<float>(com[1]),
+                                                     static_cast<float>(com[2]));
+                torque += QVector3D::crossProduct(arm, F);
+            }
+
+            // 3) 写回 xfrc_applied（世界系，作用于质心）。每帧先清零本 body 的
+            //    分量再写入，避免上一帧的力残留累加。
+            mjtNum* f = dat->xfrc_applied + 6 * be.bodyId;
+            f[0] = force.x();  f[1] = force.y();  f[2] = force.z();
+            f[3] = torque.x(); f[4] = torque.y(); f[5] = torque.z();
+        }
+    });
+
+    // 4) 高亮：穿透点染成 hitColor，其余 baseColor。
+    refreshRenderColors(hitFlags);
+}
+
+void PointCloudCollision::refreshRenderColors(const QVector<unsigned char>& hitFlags)
+{
+    if (!d->item || d->cloudId < 0 || hitFlags.size() != d->points.size())
+        return;
+    QVariantList colors;
+    colors.reserve(hitFlags.size());
+    for (unsigned char hit : hitFlags)
+        colors.append(QVariant::fromValue(hit ? d->hitColor : d->baseColor));
+    d->item->setPointCloudColors(d->cloudId, colors);
+}

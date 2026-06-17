@@ -24,6 +24,7 @@
 #include <QStringList>
 #include <QSize>
 #include <QVariant>
+#include <QVector>
 #include <QVector4D>
 #include <QQuaternion>
 #include <QtCore/qglobal.h>
@@ -54,6 +55,8 @@ struct mjvScene_;
 typedef mjvScene_ mjvScene;
 namespace mujoco { class Simulate; }
 namespace mjqt { class QtPlatformUIAdapter; }
+
+class PointCloudRenderer;
 
 #ifndef MUJOCOQUICKITEM_EXPORT
 #  define MUJOCOQUICKITEM_EXPORT
@@ -88,6 +91,21 @@ public:
         PrimitiveEllipsoid
     };
     Q_ENUM(PrimitiveType)
+
+    // 点云中单个点的渲染样式（参考 RViz 点云显示，全部是正对相机的 point sprite，
+    // 由 GPU 的 GL_POINTS 叠加层绘制，可承载百万级点）：
+    //   PointStylePixel  —— 固定屏幕像素大小，最快；pointSize 单位为像素。
+    //   PointStyleSquare —— 世界尺寸方片，随距离透视缩放；pointSize 单位为米（半边长）。
+    //   PointStyleCircle —— 世界尺寸圆片，正对相机；pointSize 单位为米（半径）。
+    //   PointStyleSphere —— 世界尺寸、正对相机、带球面着色（RViz 的 Spheres/Billboards）；
+    //                       pointSize 单位为米（半径）。
+    enum PointCloudStyle {
+        PointStylePixel = 0,
+        PointStyleSquare,
+        PointStyleCircle,
+        PointStyleSphere
+    };
+    Q_ENUM(PointCloudStyle)
 
     explicit MujocoQuickItem(QQuickItem *parent = nullptr);
     ~MujocoQuickItem() override;
@@ -238,6 +256,61 @@ public:
     // 是分开的，objectInfo() 列出的 link1..link6 等是 body 名，不一定存在同名 site。
     // 用于配合 setTrajectoryTrackedSite 排查 / 选择 TCP。场景未加载时返回空列表。
     Q_INVOKABLE QStringList siteNames() const;
+
+    // ------------------------------------------------------------------
+    // 点云（point cloud）可视化接口
+    // ------------------------------------------------------------------
+    // MuJoCo 原生不支持点云。这里用 GPU 的 GL_POINTS 叠加层把点云直接画进
+    // MuJoCo 的离屏帧缓冲（共享其深度缓冲 → 与场景正确互遮挡），一个点云一次
+    // draw call，可承载百万级点。点云仅用于渲染，不参与物理、不会保存到
+    // .xml / .mjb，与 addVisualPrimitive / 轨迹各自独立。
+    //
+    // 碰撞：本类不在 MuJoCo 内部对点云做碰撞。点云数据通过 pointCloudPoints()
+    // 等线程安全访问器暴露给外部碰撞库（如 coal）；外部库算出的接触结果可经由
+    // withMutableSimulation() 等机制写回 MuJoCo（见 demo/pointcloudcollision）。
+    //
+    // 高效写入（推荐，3D 传感器 → C++）：用 setPointCloudData() 传扁平 float 数组，
+    // 直接上传 GPU，避免 QVariant 装箱开销。QVariant 接口（addPointCloud 的 points
+    // 参数 / updatePointCloudPoints / setPointCloudColors）保留给 QML 与小点云。
+    //
+    // points 输入（QVariant 形式）支持：
+    //   1. QVector3D 列表（或每个元素是 [x,y,z] 子列表）；
+    //   2. 扁平数字列表 [x0,y0,z0, x1,y1,z1, ...]，长度须为 3 的倍数。
+    //
+    // 失败返回值：addPointCloud 返回 -1；其余 setter 返回 false（多为 cloudId 不存在
+    // 或场景未加载）。
+    Q_INVOKABLE int addPointCloud(const QVariant& points = QVariantList(),
+                                  float pointSize = 3.0f,
+                                  PointCloudStyle style = PointStylePixel,
+                                  const QVector4D& rgba = QVector4D(0.2f, 0.8f, 1.0f, 1.0f));
+    Q_INVOKABLE bool removePointCloud(int cloudId);
+    Q_INVOKABLE void clearPointClouds();
+
+    // 高效批量写入：positions 为扁平 [x,y,z, ...]（长度须为 3 的倍数）。
+    // colors 为扁平 [r,g,b,a, ...]（0~1），可为空表示用统一颜色；非空时长度须为
+    // (positions.size()/3)*4。直接上传 GPU，适合百万级点的逐帧更新。
+    void setPointCloudData(int cloudId,
+                           const QVector<float>& positions,
+                           const QVector<float>& colors = QVector<float>());
+
+    // 替换指定点云的全部点（QVariant，QML 友好）；保留样式 / 尺寸 / 颜色设置。
+    Q_INVOKABLE bool updatePointCloudPoints(int cloudId, const QVariant& points);
+    // 设置每点颜色（rgba，0~1）。colors 数量须与当前点数一致，否则返回 false；
+    // 传入空列表则清除每点颜色，回退到统一颜色。
+    Q_INVOKABLE bool setPointCloudColors(int cloudId, const QVariant& colors);
+    Q_INVOKABLE bool setPointCloudVisible(int cloudId, bool visible);
+    // 设置点云统一颜色（每点颜色未设置时生效）。
+    Q_INVOKABLE bool setPointCloudColor(int cloudId, const QVector4D& rgba);
+    // 设置点尺寸：Pixel 样式为像素，其余样式为世界半径（米）。
+    Q_INVOKABLE bool setPointCloudPointSize(int cloudId, float pointSize);
+    Q_INVOKABLE bool setPointCloudStyle(int cloudId, PointCloudStyle style);
+    Q_INVOKABLE int  pointCloudCount() const;
+    Q_INVOKABLE int  pointCloudPointCount(int cloudId) const;
+    // 线程安全地返回指定点云的全部点（世界坐标，QVariantList<QVector3D>），
+    // 供 coal 等外部碰撞库读取；cloudId 不存在时返回空列表。
+    Q_INVOKABLE QVariantList pointCloudPoints(int cloudId) const;
+    // C++ 便捷访问：等价于 pointCloudPoints，但直接返回 QVector<QVector3D>。
+    QVector<QVector3D> pointCloudPointsRaw(int cloudId) const;
 
     // ------------------------------------------------------------------
     // 场景物体查询与编辑接口
@@ -473,6 +546,7 @@ public:
     void onFrameRendered() override;
     void onSetTitle(const QString& title) override;
     void onToggleFullscreen() override;
+    void onRenderOverlay(unsigned int targetFbo, int viewWidth, int viewHeight) override;
 
 public:
     bool simulationRunning() const { return m_simulationRunning.load(); }
@@ -627,8 +701,8 @@ private:
     //   [0, m_staticVisualGeomCount)             → addVisualPrimitive 添加的静态几何
     //   [m_staticVisualGeomCount, m_userScene->ngeom)
     //                                            → 轨迹连线段（每次重建）
-    // 所有 m_trajectories / m_staticVisualGeomCount 的读写必须在持有
-    // m_sim->mtx 的前提下进行（与 m_userScene 一致）。
+    // 所有 m_trajectories / m_staticVisualGeomCount 的读写必须在持有 m_sim->mtx
+    // 的前提下进行（与 m_userScene 一致）。点云不占用 user_scn（走独立 GPU 叠加层）。
     struct TrajectoryState {
         int       id = -1;
         int       maxPoints = 256;
@@ -646,6 +720,34 @@ private:
     int                          m_staticVisualGeomCount = 0;
     std::vector<TrajectoryState> m_trajectories;
     int                          m_nextTrajectoryId = 1;
+
+    // ------------------------------------------------------------------
+    // 点云状态（GPU GL_POINTS 叠加层）
+    // ------------------------------------------------------------------
+    // CPU 侧存扁平 float 缓冲（positions xyz / colors rgba），由 GUI 线程的
+    // setter 写入并置 dirty；渲染线程在 onRenderOverlay() 里按 dirty 上传到
+    // PointCloudRenderer 的 VBO 并绘制。所有访问受 m_pointCloudMtx 保护（与
+    // m_sim->mtx 独立，因为渲染发生在 SwapBuffers，不持 sim 锁）。
+    struct PointCloudState {
+        int       id = -1;
+        int       style = 0;             // PointCloudStyle
+        float     pointSize = 3.0f;      // Pixel: 像素；其余: 世界半径(米)
+        QVector4D rgba {0.2f, 0.8f, 1.0f, 1.0f}; // 统一颜色（无逐点颜色时）
+        bool      visible = true;
+        std::vector<float> positions;    // xyz 扁平
+        std::vector<float> colors;       // rgba 扁平；空 => 用 rgba
+        bool      dirtyPositions = true;
+        bool      dirtyColors = true;
+    };
+
+    mutable std::mutex             m_pointCloudMtx;
+    std::vector<PointCloudState>   m_pointClouds;
+    int                            m_nextPointCloudId = 1;
+    std::unique_ptr<PointCloudRenderer> m_pointRenderer; // 仅渲染线程触碰其 GL 资源
+
+    // 查找 cloudId 对应的状态（须持 m_pointCloudMtx），未找到返回 nullptr。
+    PointCloudState*       findPointCloud(int cloudId);
+    const PointCloudState* findPointCloud(int cloudId) const;
 
     // 必须在 m_sim->mtx 锁内调用：把 m_userScene 尾部的轨迹段全部重建。
     void rebuildTrajectoryGeomsLocked();

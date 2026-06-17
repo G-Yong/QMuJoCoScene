@@ -214,6 +214,81 @@ inline bool variantToVector4(const QVariant& value, QVector4D* result) {
     return true;
 }
 
+// 解析点云的点列表。两种输入都接受：
+//   1. QVector3D 列表：[QVector3D, QVector3D, ...]，或元素本身是 [x,y,z] 子列表；
+//   2. 扁平数字列表：[x0,y0,z0, x1,y1,z1, ...]，长度须为 3 的倍数。
+// 空列表合法（清空点云）。解析失败返回 false 且不修改 out。
+inline bool variantToPointList(const QVariant& value, std::vector<QVector3D>* out) {
+    if (!out) return false;
+    if (value.canConvert<QVector3D>()) {
+        out->assign(1, value.value<QVector3D>());
+        return true;
+    }
+    const QVariantList list = value.toList();
+    if (list.isEmpty()) { out->clear(); return true; }
+
+    // 判定是否为扁平数字列表：首元素可转为 double 且不是 QVector3D / 子列表。
+    const QVariant& first = list.front();
+    const bool firstIsPoint = first.canConvert<QVector3D>() ||
+                              static_cast<QMetaType::Type>(first.userType()) == QMetaType::QVariantList;
+    std::vector<QVector3D> parsed;
+    if (firstIsPoint) {
+        parsed.reserve(static_cast<size_t>(list.size()));
+        for (const QVariant& item : list) {
+            QVector3D p;
+            if (!variantToVector3(item, &p)) return false;
+            parsed.push_back(p);
+        }
+    } else {
+        if (list.size() % 3 != 0) return false;
+        parsed.reserve(static_cast<size_t>(list.size()) / 3);
+        for (int i = 0; i + 2 < list.size(); i += 3) {
+            double x = 0.0, y = 0.0, z = 0.0;
+            if (!variantNumberAt(list, i, &x)) return false;
+            if (!variantNumberAt(list, i + 1, &y)) return false;
+            if (!variantNumberAt(list, i + 2, &z)) return false;
+            parsed.emplace_back(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
+        }
+    }
+    *out = std::move(parsed);
+    return true;
+}
+
+// 解析每点颜色列表（rgba，0~1）。接受 QVector4D 列表 / [r,g,b,a] 子列表，
+// 或扁平数字列表 [r,g,b,a, ...]（长度为 4 的倍数）。空列表合法（清空每点颜色）。
+inline bool variantToColorList(const QVariant& value, std::vector<QVector4D>* out) {
+    if (!out) return false;
+    const QVariantList list = value.toList();
+    if (list.isEmpty()) { out->clear(); return true; }
+
+    const QVariant& first = list.front();
+    const bool firstIsColor = first.canConvert<QVector4D>() ||
+                              static_cast<QMetaType::Type>(first.userType()) == QMetaType::QVariantList;
+    std::vector<QVector4D> parsed;
+    if (firstIsColor) {
+        parsed.reserve(static_cast<size_t>(list.size()));
+        for (const QVariant& item : list) {
+            QVector4D c;
+            if (!variantToVector4(item, &c)) return false;
+            parsed.push_back(c);
+        }
+    } else {
+        if (list.size() % 4 != 0) return false;
+        parsed.reserve(static_cast<size_t>(list.size()) / 4);
+        for (int i = 0; i + 3 < list.size(); i += 4) {
+            double r = 0.0, g = 0.0, b = 0.0, a = 0.0;
+            if (!variantNumberAt(list, i, &r)) return false;
+            if (!variantNumberAt(list, i + 1, &g)) return false;
+            if (!variantNumberAt(list, i + 2, &b)) return false;
+            if (!variantNumberAt(list, i + 3, &a)) return false;
+            parsed.emplace_back(static_cast<float>(r), static_cast<float>(g),
+                                static_cast<float>(b), static_cast<float>(a));
+        }
+    }
+    *out = std::move(parsed);
+    return true;
+}
+
 inline bool variantToPrimitiveType(const QVariant& value, MujocoQuickItem::PrimitiveType* result) {
     if (!result) return false;
     bool ok = false;

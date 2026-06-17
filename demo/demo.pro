@@ -21,12 +21,15 @@ include(../src/qmujocoscene.pri)
 # ----------------------------------------------------------------------------
 SOURCES += \
     coalcollision.cpp \
-    main.cpp
+    pointcloudcollision.cpp \
+    demo_main.cpp
 
 RESOURCES += qml.qrc
 
 HEADERS += \
-    coalcollision.h
+    coalcollision.h \
+    pointcloudcollision.h \
+    plyloader.h
 
 
 INCLUDEPATH += $$PWD/../thirdparty/coal/include

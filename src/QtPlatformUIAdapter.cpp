@@ -130,6 +130,10 @@ void QtPlatformUIAdapter::SwapBuffers() {
     // 这里把它解析到我们自己的可共享纹理上，供 Qt Quick 渲染线程采样。
     auto* glctx = QOpenGLContext::currentContext();
     if (glctx && con_.offWidth > 0 && con_.offHeight > 0 && con_.offFBO) {
+        // 先让宿主把自定义内容（点云 GL_POINTS 叠加层）画进同一个离屏 FBO，
+        // 共享 MuJoCo 的深度缓冲 → 与场景正确互遮挡。必须在下面 blit 之前。
+        if (m_host) m_host->onRenderOverlay(con_.offFBO, con_.offWidth, con_.offHeight);
+
         EnsureSharedTarget(con_.offWidth, con_.offHeight);
         unsigned int sharedFbo = m_sharedFbo;
         if (sharedFbo) {

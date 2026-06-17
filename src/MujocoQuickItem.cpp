@@ -1,6 +1,7 @@
 #include "MujocoQuickItem.h"
 #include "MujocoQuickItemHelpers.h"
 #include "QtPlatformUIAdapter.h"
+#include "PointCloudRenderer.h"
 
 #include "simulate.h"
 #include <mujoco/mujoco.h>
@@ -236,6 +237,10 @@ void MujocoQuickItem::closeScene() {
     }
     m_trajectories.clear();
     m_staticVisualGeomCount = 0;
+    {
+        std::lock_guard<std::mutex> lk(m_pointCloudMtx);
+        m_pointClouds.clear();
+    }
 
     m_sim.reset();
     // 渲染线程退出前已把 m_ctx / m_surface 的线程亲和性释放为 nullptr，
@@ -896,6 +901,288 @@ void MujocoQuickItem::rebuildTrajectoryGeomsLocked() {
         if (g >= maxg) break;
     }
     m_userScene->ngeom = g;
+}
+
+// ===========================================================================
+// 点云实现（GPU GL_POINTS 叠加层）
+// ===========================================================================
+// CPU 侧只维护扁平 float 缓冲与样式/颜色等参数（受 m_pointCloudMtx 保护）；
+// 真正的 GPU 上传与绘制在渲染线程的 onRenderOverlay() 中完成。
+
+MujocoQuickItem::PointCloudState* MujocoQuickItem::findPointCloud(int cloudId) {
+    for (PointCloudState& pc : m_pointClouds) {
+        if (pc.id == cloudId) return &pc;
+    }
+    return nullptr;
+}
+
+const MujocoQuickItem::PointCloudState* MujocoQuickItem::findPointCloud(int cloudId) const {
+    for (const PointCloudState& pc : m_pointClouds) {
+        if (pc.id == cloudId) return &pc;
+    }
+    return nullptr;
+}
+
+int MujocoQuickItem::addPointCloud(const QVariant& points,
+                                   float pointSize,
+                                   PointCloudStyle style,
+                                   const QVector4D& rgba) {
+    std::vector<QVector3D> parsed;
+    if (!variantToPointList(points, &parsed)) {
+        setLastError(QStringLiteral("Invalid point cloud data"));
+        return -1;
+    }
+    if (pointSize <= 0.0f)
+        pointSize = (style == PointStylePixel) ? 3.0f : 0.01f;
+
+    int newId = -1;
+    {
+        std::lock_guard<std::mutex> lk(m_pointCloudMtx);
+        PointCloudState pc;
+        pc.id        = m_nextPointCloudId++;
+        pc.style     = static_cast<int>(style);
+        pc.pointSize = pointSize;
+        pc.rgba      = rgba;
+        pc.positions.reserve(parsed.size() * 3);
+        for (const QVector3D& p : parsed) {
+            pc.positions.push_back(p.x());
+            pc.positions.push_back(p.y());
+            pc.positions.push_back(p.z());
+        }
+        newId = pc.id;
+        m_pointClouds.push_back(std::move(pc));
+    }
+    setLastError(QString());
+    requestRenderUpdate();
+    return newId;
+}
+
+void MujocoQuickItem::setPointCloudData(int cloudId,
+                                        const QVector<float>& positions,
+                                        const QVector<float>& colors) {
+    if (positions.size() % 3 != 0) {
+        setLastError(QStringLiteral("Point cloud positions size must be a multiple of 3"));
+        return;
+    }
+    const int count = positions.size() / 3;
+    if (!colors.isEmpty() && colors.size() != count * 4) {
+        setLastError(QStringLiteral("Point cloud colors size (%1) must be point count*4 (%2)")
+                     .arg(colors.size()).arg(count * 4));
+        return;
+    }
+    std::lock_guard<std::mutex> lk(m_pointCloudMtx);
+    PointCloudState* pc = findPointCloud(cloudId);
+    if (!pc) return;
+    pc->positions.assign(positions.begin(), positions.end());
+    pc->colors.assign(colors.begin(), colors.end());
+    pc->dirtyPositions = true;
+    pc->dirtyColors = true;
+    setLastError(QString());
+    requestRenderUpdate();
+}
+
+bool MujocoQuickItem::removePointCloud(int cloudId) {
+    bool removed = false;
+    {
+        std::lock_guard<std::mutex> lk(m_pointCloudMtx);
+        for (auto it = m_pointClouds.begin(); it != m_pointClouds.end(); ++it) {
+            if (it->id == cloudId) {
+                m_pointClouds.erase(it);
+                removed = true;
+                break;
+            }
+        }
+    }
+    if (removed) requestRenderUpdate();
+    return removed;
+}
+
+void MujocoQuickItem::clearPointClouds() {
+    {
+        std::lock_guard<std::mutex> lk(m_pointCloudMtx);
+        if (m_pointClouds.empty()) return;
+        m_pointClouds.clear();
+    }
+    requestRenderUpdate();
+}
+
+bool MujocoQuickItem::updatePointCloudPoints(int cloudId, const QVariant& points) {
+    std::vector<QVector3D> parsed;
+    if (!variantToPointList(points, &parsed)) {
+        setLastError(QStringLiteral("Invalid point cloud data"));
+        return false;
+    }
+    std::lock_guard<std::mutex> lk(m_pointCloudMtx);
+    PointCloudState* pc = findPointCloud(cloudId);
+    if (!pc) return false;
+    pc->positions.resize(parsed.size() * 3);
+    for (size_t i = 0; i < parsed.size(); ++i) {
+        pc->positions[3 * i + 0] = parsed[i].x();
+        pc->positions[3 * i + 1] = parsed[i].y();
+        pc->positions[3 * i + 2] = parsed[i].z();
+    }
+    // 点数变化时旧的逐点颜色不再匹配，回退到统一颜色。
+    if (pc->colors.size() != parsed.size() * 4) {
+        pc->colors.clear();
+        pc->dirtyColors = true;
+    }
+    pc->dirtyPositions = true;
+    setLastError(QString());
+    requestRenderUpdate();
+    return true;
+}
+
+bool MujocoQuickItem::setPointCloudColors(int cloudId, const QVariant& colors) {
+    std::vector<QVector4D> parsed;
+    if (!variantToColorList(colors, &parsed)) {
+        setLastError(QStringLiteral("Invalid point cloud colors"));
+        return false;
+    }
+    std::lock_guard<std::mutex> lk(m_pointCloudMtx);
+    PointCloudState* pc = findPointCloud(cloudId);
+    if (!pc) return false;
+    const size_t pointCount = pc->positions.size() / 3;
+    if (!parsed.empty() && parsed.size() != pointCount) {
+        setLastError(QStringLiteral("Point cloud color count (%1) does not match point count (%2)")
+                     .arg(parsed.size()).arg(pointCount));
+        return false;
+    }
+    pc->colors.resize(parsed.size() * 4);
+    for (size_t i = 0; i < parsed.size(); ++i) {
+        pc->colors[4 * i + 0] = parsed[i].x();
+        pc->colors[4 * i + 1] = parsed[i].y();
+        pc->colors[4 * i + 2] = parsed[i].z();
+        pc->colors[4 * i + 3] = parsed[i].w();
+    }
+    pc->dirtyColors = true;
+    setLastError(QString());
+    requestRenderUpdate();
+    return true;
+}
+
+bool MujocoQuickItem::setPointCloudVisible(int cloudId, bool visible) {
+    std::lock_guard<std::mutex> lk(m_pointCloudMtx);
+    PointCloudState* pc = findPointCloud(cloudId);
+    if (!pc) return false;
+    pc->visible = visible;
+    requestRenderUpdate();
+    return true;
+}
+
+bool MujocoQuickItem::setPointCloudColor(int cloudId, const QVector4D& rgba) {
+    std::lock_guard<std::mutex> lk(m_pointCloudMtx);
+    PointCloudState* pc = findPointCloud(cloudId);
+    if (!pc) return false;
+    pc->rgba = rgba;
+    requestRenderUpdate();
+    return true;
+}
+
+bool MujocoQuickItem::setPointCloudPointSize(int cloudId, float pointSize) {
+    if (pointSize <= 0.0f) pointSize = 1.0f;
+    std::lock_guard<std::mutex> lk(m_pointCloudMtx);
+    PointCloudState* pc = findPointCloud(cloudId);
+    if (!pc) return false;
+    pc->pointSize = pointSize;
+    requestRenderUpdate();
+    return true;
+}
+
+bool MujocoQuickItem::setPointCloudStyle(int cloudId, PointCloudStyle style) {
+    std::lock_guard<std::mutex> lk(m_pointCloudMtx);
+    PointCloudState* pc = findPointCloud(cloudId);
+    if (!pc) return false;
+    pc->style = static_cast<int>(style);
+    requestRenderUpdate();
+    return true;
+}
+
+int MujocoQuickItem::pointCloudCount() const {
+    std::lock_guard<std::mutex> lk(m_pointCloudMtx);
+    return static_cast<int>(m_pointClouds.size());
+}
+
+int MujocoQuickItem::pointCloudPointCount(int cloudId) const {
+    std::lock_guard<std::mutex> lk(m_pointCloudMtx);
+    const PointCloudState* pc = findPointCloud(cloudId);
+    return pc ? static_cast<int>(pc->positions.size() / 3) : 0;
+}
+
+QVector<QVector3D> MujocoQuickItem::pointCloudPointsRaw(int cloudId) const {
+    QVector<QVector3D> result;
+    std::lock_guard<std::mutex> lk(m_pointCloudMtx);
+    const PointCloudState* pc = findPointCloud(cloudId);
+    if (!pc) return result;
+    const size_t n = pc->positions.size() / 3;
+    result.reserve(static_cast<int>(n));
+    for (size_t i = 0; i < n; ++i) {
+        result.append(QVector3D(pc->positions[3 * i + 0],
+                                pc->positions[3 * i + 1],
+                                pc->positions[3 * i + 2]));
+    }
+    return result;
+}
+
+QVariantList MujocoQuickItem::pointCloudPoints(int cloudId) const {
+    QVariantList result;
+    const QVector<QVector3D> points = pointCloudPointsRaw(cloudId);
+    result.reserve(points.size());
+    for (const QVector3D& p : points) result.append(QVariant::fromValue(p));
+    return result;
+}
+
+// 渲染线程：把点云用 GL_POINTS 画进 MuJoCo 离屏 FBO（共享深度，正确互遮挡）。
+void MujocoQuickItem::onRenderOverlay(unsigned int targetFbo, int viewWidth, int viewHeight) {
+    if (!m_sim || viewWidth <= 0 || viewHeight <= 0) return;
+
+    struct DrawItem { int id; int style; float size; QVector4D color; bool visible; };
+    std::vector<DrawItem> draws;
+    std::vector<int> ids;
+    bool anyVisible = false;
+    {
+        std::lock_guard<std::mutex> lk(m_pointCloudMtx);
+        if (m_pointClouds.empty()) {
+            if (m_pointRenderer) m_pointRenderer->retainOnly({});
+            return;
+        }
+        if (!m_pointRenderer) m_pointRenderer.reset(new PointCloudRenderer());
+        ids.reserve(m_pointClouds.size());
+        draws.reserve(m_pointClouds.size());
+        for (PointCloudState& pc : m_pointClouds) {
+            ids.push_back(pc.id);
+            if (pc.dirtyPositions) {
+                const int count = static_cast<int>(pc.positions.size() / 3);
+                m_pointRenderer->uploadPositions(pc.id, pc.positions.data(), count);
+                pc.dirtyPositions = false;
+            }
+            if (pc.dirtyColors) {
+                const int ccount = static_cast<int>(pc.colors.size() / 4);
+                m_pointRenderer->uploadColors(
+                    pc.id, pc.colors.empty() ? nullptr : pc.colors.data(), ccount);
+                pc.dirtyColors = false;
+            }
+            draws.push_back({pc.id, pc.style, pc.pointSize, pc.rgba, pc.visible});
+            if (pc.visible && !pc.positions.empty()) anyVisible = true;
+        }
+        m_pointRenderer->retainOnly(ids);
+    }
+    if (!anyVisible) return;
+
+    // 相机：与 mjr_render 的 setView 一致，mono 取 camera[0]/camera[1] 的平均。
+    const mjvScene& scn = m_sim->scn;
+    mjvGLCamera cam = mjv_averageCamera(&scn.camera[0], &scn.camera[1]);
+
+    m_pointRenderer->beginFrame(
+        targetFbo, viewWidth, viewHeight,
+        cam.pos, cam.forward, cam.up,
+        cam.frustum_center, cam.frustum_width, cam.frustum_bottom, cam.frustum_top,
+        cam.frustum_near, cam.frustum_far, cam.orthographic != 0,
+        scn.enabletransform != 0, scn.translate, scn.rotate, scn.scale);
+    for (const DrawItem& it : draws) {
+        if (!it.visible) continue;
+        m_pointRenderer->drawCloud(it.id, it.style, it.size, it.color);
+    }
+    m_pointRenderer->endFrame();
 }
 
 void MujocoQuickItem::sampleTrackedTrajectoriesLocked(const mjModel* m, const mjData* d) {
@@ -2756,6 +3043,9 @@ void MujocoQuickItem::renderThreadMain() {
                               Qt::QueuedConnection);
 
     m_sim->RenderLoop();
+
+    // 释放点云 GPU 资源（仍在渲染线程、GL context 当前）。
+    if (m_pointRenderer) m_pointRenderer->releaseGL();
 
     // 释放适配器持有的 GL 资源（共享纹理 / FBO），此时 GL context 仍在当前线程
     if (m_adapterRaw) m_adapterRaw->ReleaseSharedGL();

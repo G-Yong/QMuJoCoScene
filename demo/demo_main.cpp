@@ -112,7 +112,7 @@ int addPlyPointCloud(MujocoQuickItem* mujoco, const QString& plyPath,
     const float span = (zmax > zmin) ? (zmax - zmin) : 1.0f;
     for (int i = 0; i < pts.size(); ++i) {
         const QVector3D& p = pts[i];
-        positions << p.x() << p.y() << p.z();
+        positions << p.x() << p.y() + 0.2 << p.z();
         if (ply.hasColor) {
             colors << ply.colors[4 * i + 0] << ply.colors[4 * i + 1]
                    << ply.colors[4 * i + 2] << ply.colors[4 * i + 3];
