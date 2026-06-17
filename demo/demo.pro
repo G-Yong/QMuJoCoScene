@@ -22,7 +22,7 @@ include(../src/qmujocoscene.pri)
 SOURCES += \
     coalcollision.cpp \
     pointcloudcollision.cpp \
-    demo_main.cpp
+    main.cpp
 
 RESOURCES += qml.qrc
 

@@ -112,7 +112,7 @@ int addPlyPointCloud(MujocoQuickItem* mujoco, const QString& plyPath,
     const float span = (zmax > zmin) ? (zmax - zmin) : 1.0f;
     for (int i = 0; i < pts.size(); ++i) {
         const QVector3D& p = pts[i];
-        positions << p.x() << p.y() << p.z();
+        positions << p.x() << p.y() + 0.2 << p.z();
         if (ply.hasColor) {
             colors << ply.colors[4 * i + 0] << ply.colors[4 * i + 1]
                    << ply.colors[4 * i + 2] << ply.colors[4 * i + 3];
@@ -243,33 +243,33 @@ int main(int argc, char *argv[])
                          3.0f, QVector3D(0.4f, 0.0f, 0.0f));
      });
 
-    // ----------------------------------------------------------------------
-    // 点云碰撞示例：coal(body 网格 vs 点云) → 惩罚力 xfrc_applied 打入 MuJoCo。
-    // 实际项目里把 setPoints(...) 换成你自己的点云数据即可。
-    // ----------------------------------------------------------------------
-    PointCloudCollision pcc;
-    pcc.setMujocoItem(mujoco);
+    // // ----------------------------------------------------------------------
+    // // 点云碰撞示例：coal(body 网格 vs 点云) → 惩罚力 xfrc_applied 打入 MuJoCo。
+    // // 实际项目里把 setPoints(...) 换成你自己的点云数据即可。
+    // // ----------------------------------------------------------------------
+    // PointCloudCollision pcc;
+    // pcc.setMujocoItem(mujoco);
 
-    QObject::connect(mujoco, &MujocoQuickItem::sceneLoaded, view, [=, &pcc](const QString& /*source*/) {
-        pcc.addCollisionBody("ball");   // ball 是 mesh body，可被 coal 提取网格
-        pcc.setPointRadius(0.01);
-        pcc.setStiffness(3000.0);
-        pcc.setDamping(30.0);
+    // QObject::connect(mujoco, &MujocoQuickItem::sceneLoaded, view, [=, &pcc](const QString& /*source*/) {
+    //     pcc.addCollisionBody("ball");   // ball 是 mesh body，可被 coal 提取网格
+    //     pcc.setPointRadius(0.01);
+    //     pcc.setStiffness(3000.0);
+    //     pcc.setDamping(30.0);
 
-        // 演示点云：一片水平点阵（实际中替换为你的传感器点云）。
-        QVector<QVector3D> demoCloud;
-        for (int ix = -8; ix <= 8; ++ix)
-            for (int iy = -8; iy <= 8; ++iy)
-                demoCloud.append(QVector3D(ix * 0.02f, iy * 0.02f, 0.12f));
-        pcc.setPoints(demoCloud);
+    //     // 演示点云：一片水平点阵（实际中替换为你的传感器点云）。
+    //     QVector<QVector3D> demoCloud;
+    //     for (int ix = -8; ix <= 8; ++ix)
+    //         for (int iy = -8; iy <= 8; ++iy)
+    //             demoCloud.append(QVector3D(ix * 0.02f, iy * 0.02f, 0.12f));
+    //     pcc.setPoints(demoCloud);
 
-        pcc.setupForLoadedScene();
-    });
+    //     pcc.setupForLoadedScene();
+    // });
 
-    // 周期性驱动点云碰撞注入（~120Hz）。
-    QTimer* pccTimer = new QTimer(view);
-    QObject::connect(pccTimer, &QTimer::timeout, &pcc, &PointCloudCollision::update);
-    pccTimer->start(8);
+    // // 周期性驱动点云碰撞注入（~120Hz）。
+    // QTimer* pccTimer = new QTimer(view);
+    // QObject::connect(pccTimer, &QTimer::timeout, &pcc, &PointCloudCollision::update);
+    // pccTimer->start(8);
 
     return app.exec();
 }
