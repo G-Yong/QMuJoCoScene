@@ -30,7 +30,8 @@ HEADERS += \
     coalcollision.h \
     pointcloudcollision.h \
     plyloader.h \
-    assimploader.h
+    assimploader.h \
+    CoalBodyRegistry.h
 
 
 INCLUDEPATH += $$PWD/../thirdparty/coal/include

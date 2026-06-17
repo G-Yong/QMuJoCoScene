@@ -72,6 +72,9 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> d;
+
+    // 执行一次碰撞检测并填充结果（detect/detectPair 共享实现）。
+    CoalCollisionResult collidePair(const QString& a, const QString& b);
 };
 
 class CoalCollision : public QObject
@@ -101,7 +104,6 @@ signals:
 private:
     void registerCoalBody(const QString& name);
     void updateCollisionHighlight();
-    int  findBodyId(const QString& name) const;
 
     // coal physics：注册 coal body；建立 id↔name 反查与接管 body 对集合；
     // 把 filter / provider 安装到 SimulationView。

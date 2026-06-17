@@ -1,17 +1,14 @@
 #include "pointcloudcollision.h"
+#include "CoalBodyRegistry.h"
 
 #include <mujoco/mujoco.h>
 
-#include <coal/fwd.hh>
 #include <coal/data_types.h>
 #include <coal/collision.h>
 #include <coal/collision_data.h>
 #include <coal/collision_object.h>
 #include <coal/shape/geometric_shapes.h>
-#include <coal/BV/OBBRSS.h>
-#include <coal/BVH/BVH_model.h>
 #include <coal/math/transform.h>
-#include <coal/mesh_loader/assimp.h>
 #include <coal/broadphase/broadphase_dynamic_AABB_tree.h>
 #include <coal/broadphase/broadphase_callbacks.h>
 
@@ -24,7 +21,6 @@
 #include <vector>
 
 namespace {
-using MeshModel = coal::BVHModel<coal::OBBRSS>;
 
 // coal::DynamicAABBTreeCollisionManager 的碰撞回调适配器。
 // 子类化 CollisionCallBackBase，在其 collide() 中做窄相 + 力累积。
@@ -57,14 +53,6 @@ struct PointCloudCallback : coal::CollisionCallBackBase {
 
     bool collide(coal::CollisionObject* o1,
                  coal::CollisionObject* o2) override;
-};
-
-// 一个参与碰撞的机器人 body 在 coal 里的表示。
-struct BodyEntry {
-    int                                    bodyId = -1;
-    std::shared_ptr<MeshModel>             model;   // body 局部坐标三角网格
-    std::shared_ptr<coal::CollisionObject> object;  // 每帧更新世界位姿
-    double                                 boundRadius = 0.0; // 局部包围球半径，用于粗筛
 };
 
 // PointCloudCallback::collide —— 宽相回调内的窄相 + 力累积。
@@ -146,8 +134,8 @@ struct PointCloudCollision::Impl {
     std::shared_ptr<coal::Sphere>                       pointShape;
     std::vector<std::shared_ptr<coal::CollisionObject>> pointObjects;
 
-    QStringList               bodyNames;   // 用户请求的碰撞 body
-    QHash<QString, BodyEntry> bodies;      // 已注册（含 coal 网格）的 body
+    QStringList                     bodyNames;
+    QHash<QString, CoalBodyEntry>   bodies;  // 已注册（含 coal 网格）的 body
 
     double k = 3000.0;   // 刚度
     double c = 30.0;     // 阻尼
@@ -279,8 +267,11 @@ void PointCloudCollision::addCollisionBody(const QString& bodyName)
         return;
     d->bodyNames.append(bodyName);
     // 若场景已就绪则立即注册网格。
-    if (d->item)
-        registerBodyMesh(bodyName);
+    if (d->item) {
+        CoalBodyEntry entry;
+        if (buildBodyMeshEntry(d->item, bodyName, &entry, QStringLiteral("pointcloud")))
+            d->bodies.insert(bodyName, std::move(entry));
+    }
 }
 
 void PointCloudCollision::clearCollisionBodies()
@@ -289,81 +280,15 @@ void PointCloudCollision::clearCollisionBodies()
     d->bodies.clear();
 }
 
-int PointCloudCollision::findBodyId(const QString& name) const
-{
-    if (!d->item) return -1;
-    const int count = d->item->objectCount();
-    for (int i = 0; i < count; ++i) {
-        if (d->item->objectInfo(i).name == name)
-            return i;
-    }
-    return -1;
-}
-
-void PointCloudCollision::registerBodyMesh(const QString& name)
-{
-    if (!d->item || d->bodies.contains(name))
-        return;
-    const int bodyId = findBodyId(name);
-    if (bodyId < 0) {
-        qWarning() << "[pointcloud] body not found in scene:" << name;
-        return;
-    }
-    const BodyMeshData mesh = d->item->bodyCollisionMesh(bodyId);
-    if (!mesh.valid || mesh.vertices.isEmpty() || mesh.indices.isEmpty()) {
-        qWarning() << "[pointcloud] body has no triangle mesh geom:" << name;
-        return;
-    }
-
-    std::vector<coal::Vec3s> ps;
-    ps.reserve(mesh.vertices.size());
-    for (const QVector3D& v : mesh.vertices)
-        ps.emplace_back(coal::Scalar(v.x()), coal::Scalar(v.y()), coal::Scalar(v.z()));
-
-    std::vector<coal::Triangle32> ts;
-    ts.reserve(mesh.indices.size() / 3);
-    const int vertexCount = mesh.vertices.size();
-    for (int i = 0; i + 2 < mesh.indices.size(); i += 3) {
-        const int a = mesh.indices[i];
-        const int b = mesh.indices[i + 1];
-        const int cc = mesh.indices[i + 2];
-        if (a < 0 || b < 0 || cc < 0 ||
-            a >= vertexCount || b >= vertexCount || cc >= vertexCount)
-            continue;
-        ts.emplace_back(static_cast<std::uint32_t>(a),
-                        static_cast<std::uint32_t>(b),
-                        static_cast<std::uint32_t>(cc));
-    }
-    if (ts.empty()) {
-        qWarning() << "[pointcloud] body has no valid triangles:" << name;
-        return;
-    }
-
-    auto model = std::make_shared<MeshModel>();
-    model->beginModel(static_cast<unsigned int>(ts.size()),
-                      static_cast<unsigned int>(ps.size()));
-    model->addSubModel(ps, ts);
-    model->endModel();
-    model->computeLocalAABB();
-
-    BodyEntry entry;
-    entry.bodyId      = bodyId;
-    entry.model       = model;
-    entry.object      = std::make_shared<coal::CollisionObject>(model, coal::Transform3s::Identity());
-    entry.boundRadius = static_cast<double>(model->aabb_radius);
-
-    d->bodies.insert(name, std::move(entry));
-    qDebug() << "[pointcloud] registered body:" << name
-             << "verts" << mesh.vertices.size()
-             << "tris" << (mesh.indices.size() / 3);
-}
-
 void PointCloudCollision::setupForLoadedScene()
 {
     // 场景切换：旧 bodyId 失效，重建注册。
     d->bodies.clear();
-    for (const QString& name : d->bodyNames)
-        registerBodyMesh(name);
+    for (const QString& name : d->bodyNames) {
+        CoalBodyEntry entry;
+        if (buildBodyMeshEntry(d->item, name, &entry, QStringLiteral("pointcloud")))
+            d->bodies.insert(name, std::move(entry));
+    }
 
     // 复用外部点云时，cloudId 由调用方在重建点云后通过 setRenderCloud 提供，
     // 这里不重置、也不自建。
@@ -392,7 +317,7 @@ void PointCloudCollision::update()
 
     d->item->withMutableSimulation([&](mjModel* m, mjData* dat) {
         for (auto it = d->bodies.begin(); it != d->bodies.end(); ++it) {
-            BodyEntry& be = it.value();
+            CoalBodyEntry& be = it.value();
             if (be.bodyId < 0 || be.bodyId >= m->nbody || !be.object)
                 continue;
 

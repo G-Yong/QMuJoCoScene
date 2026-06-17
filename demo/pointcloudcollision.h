@@ -92,8 +92,6 @@ public slots:
     void update();
 
 private:
-    int  findBodyId(const QString& name) const;
-    void registerBodyMesh(const QString& name);
     void rebuildCoalPoints();
     void refreshRenderColors(const QVector<unsigned char>& hitFlags);
 

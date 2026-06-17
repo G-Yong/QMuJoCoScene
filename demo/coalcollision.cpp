@@ -1,12 +1,11 @@
 #include "coalcollision.h"
+#include "CoalBodyRegistry.h"
 
 #include <coal/fwd.hh>
 #include <coal/data_types.h>
 #include <coal/collision.h>
 #include <coal/collision_data.h>
 #include <coal/collision_object.h>
-#include <coal/BV/OBBRSS.h>
-#include <coal/BVH/BVH_model.h>
 #include <coal/math/transform.h>
 
 #include <QHash>
@@ -252,7 +251,7 @@ void CoalCollision::registerCoalBody(const QString& name)
 {
     if (m_coal->hasBody(name))
         return;
-    const int bodyId = findBodyId(name);
+    const int bodyId = findBodyId(mMujocoItem, name);
     if (bodyId < 0) {
         qWarning() << "[coal] body not found in scene:" << name;
         return;
@@ -271,18 +270,6 @@ void CoalCollision::registerCoalBody(const QString& name)
     qDebug() << "registered coal body:" << name << "with" << mesh.vertices.size() << "vertices and"
              << (mesh.indices.size() / 3) << "triangles";
 }
-
-int CoalCollision::findBodyId(const QString& name) const
-{
-    const int count = mMujocoItem->objectCount();
-    for (int i = 0; i < count; ++i) {
-        if (mMujocoItem->objectInfo(i).name == name)
-            return i;
-    }
-    return -1;
-}
-
-
 
 namespace {
 using MeshModel = coal::BVHModel<coal::OBBRSS>;
@@ -310,44 +297,17 @@ bool CoalCollisionDetector::registerBody(const QString& name,
                                          const QVector<QVector3D>& vertices,
                                          const QVector<int>& indices)
 {
-    if (name.isEmpty() || vertices.isEmpty() || indices.size() < 3)
+    if (name.isEmpty()) return false;
+
+    CoalBodyEntry entry;
+    if (!buildCoalModel(vertices, indices, &entry))
         return false;
 
-    std::vector<coal::Vec3s> ps;
-    ps.reserve(vertices.size());
-    for (const QVector3D& v : vertices)
-        ps.emplace_back(coal::Scalar(v.x()), coal::Scalar(v.y()), coal::Scalar(v.z()));
+    BodyEntry be;
+    be.model  = std::move(entry.model);
+    be.object = std::move(entry.object);
 
-    std::vector<coal::Triangle32> ts;
-    ts.reserve(indices.size() / 3);
-    const int vertexCount = vertices.size();
-    for (int i = 0; i + 2 < indices.size(); i += 3) {
-        const int a = indices[i];
-        const int b = indices[i + 1];
-        const int c = indices[i + 2];
-        if (a < 0 || b < 0 || c < 0 ||
-            a >= vertexCount || b >= vertexCount || c >= vertexCount)
-            continue;
-        ts.emplace_back(static_cast<std::uint32_t>(a),
-                        static_cast<std::uint32_t>(b),
-                        static_cast<std::uint32_t>(c));
-    }
-    if (ts.empty())
-        return false;
-
-    auto model = std::make_shared<MeshModel>();
-    model->beginModel(static_cast<unsigned int>(ts.size()),
-                      static_cast<unsigned int>(ps.size()));
-    model->addSubModel(ps, ts);
-    model->endModel();
-    model->computeLocalAABB();
-
-    BodyEntry entry;
-    entry.model  = model;
-    entry.object = std::make_shared<coal::CollisionObject>(
-        model, coal::Transform3s::Identity());
-
-    d->bodies.insert(name, std::move(entry));
+    d->bodies.insert(name, std::move(be));
     return true;
 }
 
@@ -415,53 +375,7 @@ void CoalCollisionDetector::updatePose(const QString& name,
     it->object->computeAABB();
 }
 
-QVector<CoalCollisionResult> CoalCollisionDetector::detect()
-{
-    QVector<CoalCollisionResult> results;
-    results.reserve(d->pairs.size());
-
-    coal::CollisionRequest request;
-    request.enable_contact = true;
-    request.num_max_contacts = 100;
-    request.enable_distance_lower_bound = true;
-    request.security_margin = coal::Scalar(d->securityMargin);
-
-    for (const auto& pair : qAsConst(d->pairs)) {
-        auto itA = d->bodies.find(pair.first);
-        auto itB = d->bodies.find(pair.second);
-        if (itA == d->bodies.end() || itB == d->bodies.end())
-            continue;
-        if (!itA->object || !itB->object)
-            continue;
-
-        coal::CollisionResult res;
-        coal::collide(itA->object.get(), itB->object.get(), request, res);
-
-        CoalCollisionResult out;
-        out.bodyA = pair.first;
-        out.bodyB = pair.second;
-        out.colliding = res.isCollision();
-        out.distanceLowerBound = double(res.distance_lower_bound);
-
-        if (out.colliding) {
-            const std::size_t n = res.numContacts();
-            out.contacts.reserve(int(n));
-            for (std::size_t i = 0; i < n; ++i) {
-                const coal::Contact& c = res.getContact(int(i));
-                CoalContactPoint cp;
-                cp.position = QVector3D(float(c.pos.x()), float(c.pos.y()), float(c.pos.z()));
-                cp.normal   = QVector3D(float(c.normal.x()), float(c.normal.y()), float(c.normal.z()));
-                cp.penetrationDepth = double(c.penetration_depth);
-                out.contacts.append(cp);
-            }
-        }
-        results.append(out);
-        res.clear();
-    }
-    return results;
-}
-
-CoalCollisionResult CoalCollisionDetector::detectPair(const QString& a, const QString& b)
+CoalCollisionResult CoalCollisionDetector::collidePair(const QString& a, const QString& b)
 {
     CoalCollisionResult out;
     out.bodyA = a;
@@ -499,6 +413,20 @@ CoalCollisionResult CoalCollisionDetector::detectPair(const QString& a, const QS
     }
     res.clear();
     return out;
+}
+
+QVector<CoalCollisionResult> CoalCollisionDetector::detect()
+{
+    QVector<CoalCollisionResult> results;
+    results.reserve(d->pairs.size());
+    for (const auto& pair : qAsConst(d->pairs))
+        results.append(collidePair(pair.first, pair.second));
+    return results;
+}
+
+CoalCollisionResult CoalCollisionDetector::detectPair(const QString& a, const QString& b)
+{
+    return collidePair(a, b);
 }
 
 void CoalCollisionDetector::setSecurityMargin(double margin)
