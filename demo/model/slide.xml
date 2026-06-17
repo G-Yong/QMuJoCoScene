@@ -28,7 +28,7 @@
     <light name="spotlight" mode="targetbodycom" target="slide" diffuse=".8 .8 .8" specular="0.3 0.3 0.3" pos="0 -6 4" cutoff="30"/>
     <light name="top" pos="0 0 2" mode="trackcom"/>
 
-    <body name="slide" pos="0 0 0" euler="0 0 0">
+    <body name="slide" pos="-0.5 0 0" euler="0 0 0">
       <geom type="mesh" rgba="0.79216 0.81961 0.93333 1" mesh="slide" friction="0.1 0.5 0.1" solref="0.005 1" solimp="0.99 0.99 0.001"/>
     </body>
 
@@ -37,7 +37,7 @@
       <contact friction="0.1 0.5 0.1" selfcollide="none" internal="false"/>
     </flexcomp>
 
-    <body name="ball" pos="0 0 0.3" euler="0 0 0">
+    <body name="ball" pos="0 0 0.4" euler="0 0 0">
       <freejoint/>
       <inertial pos="0 0 0" mass="0.1" diaginertia="0.001 0.001 0.001"/>
       <geom type="mesh" rgba="0.79216 0.81961 0.93333 1" mesh="ball" friction="0.1 0.5 0.01" solref="0.005 1" solimp="0.99 0.99 0.001"/>

@@ -248,7 +248,7 @@ int main(int argc, char *argv[])
         BunnyCloud bunny;
         if (!setupBunnyPointCloud(mujoco,
                                   QStringLiteral("../../../model/meshes/bunny.ply"),
-                                  3.0f, QVector3D(0.4f, 0.0f, 0.0f),
+                                  3.0f, QVector3D(0.0f, 0.0f, 0.0f),
                                   0.00035f, &bunny)) {
             return;
         }
