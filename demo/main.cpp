@@ -1,6 +1,6 @@
 #include "MujocoQuickItem.h"
 #include "pointcloudcollision.h"
-#include "plyloader.h"
+#include "assimploader.h"
 
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
@@ -83,20 +83,20 @@ struct BunnyCloud {
     float              topZ = 0.0f;      // 点云顶部 z（用于在其上方投放小球）
 };
 
-// 加载 .ply 点云，转换到 MuJoCo 的 Z-up，放大并摆放：XY 居中到 centerXY，
-// 底部贴地（zmin=0）。创建一个 Circle 样式的彩色渲染点云并开启地面倒影。
-// bunny 无颜色，按高度生成逐点色。成功返回 true 并填充 out。
-bool setupBunnyPointCloud(MujocoQuickItem* mujoco, const QString& plyPath,
+// 使用 Assimp 加载任意格式（.ply/.stl/.obj/.fbx 等）的网格，转换到 MuJoCo 的
+// Z-up，放大并摆放：XY 居中到 centerXY，底部贴地（zmin=0）。创建一个 Circle
+// 样式的彩色渲染点云并开启地面倒影。无颜色时按高度生成逐点色。
+bool setupBunnyPointCloud(MujocoQuickItem* mujoco, const QString& modelPath,
                           float scale, const QVector3D& centerXY,
                           float renderPointSize, BunnyCloud* out)
 {
-    PlyCloud ply;
+    MeshCloud ply;
     QString err;
-    if (!loadPly(plyPath, &ply, &err)) {
-        qWarning() << "[ply] load failed:" << plyPath << err;
+    if (!loadMesh(modelPath, &ply, &err)) {
+        qWarning() << "[assimp] load failed:" << modelPath << err;
         return false;
     }
-    qDebug() << "[ply] loaded" << ply.count << "points from" << plyPath
+    qDebug() << "[assimp] loaded" << ply.count << "vertices from" << modelPath
              << "hasColor=" << ply.hasColor;
 
     QVector<QVector3D> pts;
@@ -247,7 +247,7 @@ int main(int argc, char *argv[])
         // 1) 加载并渲染 bunny 点云（彩色 Circle + 地面倒影）。
         BunnyCloud bunny;
         if (!setupBunnyPointCloud(mujoco,
-                                  QStringLiteral("../../../model/meshes/bunny.ply"),
+                                  QStringLiteral("../../../model/meshes/bunny.ply"),  // 也可换成 .stl/.obj 等格式
                                   3.0f, QVector3D(0.0f, 0.0f, 0.0f),
                                   0.00035f, &bunny)) {
             return;
