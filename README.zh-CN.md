@@ -12,6 +12,8 @@ https://github.com/user-attachments/assets/49a18818-608c-457d-b89a-a16b8b40a035
 
 ![snapshot](assets/snapshot.png)
 
+![snapshot](assets/pointCloud.png)
+
 ## 特性
 
 - **零 GLFW 依赖**：用 `QtPlatformUIAdapter` 替换官方 `GlfwAdapter`，所有 OpenGL 上下文、事件均由 Qt 管理。
@@ -22,7 +24,8 @@ https://github.com/user-attachments/assets/49a18818-608c-457d-b89a-a16b8b40a035
 - **拖拽加载模型**：直接将 `.xml` / `.mjb` 文件拖入窗口即可热切换模型。
 - **独立 GPU 优先**：导出 `NvOptimusEnablement` / `AmdPowerXpressRequestHighPerformance` 符号，在双显卡笔记本上自动选用独立 GPU。
 - **物体运动轨迹可视化**：在 `MujocoQuickItem` 中添加了 [`addTrajectory`](https://github.com/G-Yong/QMuJoCoScene/blob/master/src/MujocoQuickItem.h#L171) 以及 [`setTrajectoryTrackedSite`](https://github.com/G-Yong/QMuJoCoScene/blob/master/src/MujocoQuickItem.h#L200) 等接口，允许用户在 QML 端创建和管理轨迹对象，实时可视化指定物体的运动轨迹（动态刷新）。
-
+- **点云渲染**：通过 GPU `GL_POINTS` 叠加层实现高性能点云可视化，共享 MuJoCo 渲染帧缓冲的深度缓冲（reverse-Z），与场景几何正确互遮挡。一次 draw call，百万级点。支持四种渲染样式：`PointStylePixel`（固定像素）、`PointStyleSquare`（世界尺寸方形）、`PointStyleCircle`（世界尺寸圆形）、`PointStyleSphere`（世界尺寸、球面着色 billboard）。支持逐点颜色、统一颜色、地面倒影（仿 MuJoCo 反射地面）。
+- **点云碰撞检测**：点云数据通过 `pointCloudPoints()` 等线程安全访问器暴露给外部碰撞库（如 [coal](https://github.com/coal-library/coal)），外部库的接触结果经 `withMutableSimulation()` 写回 MuJoCo。详见 `demo/pointcloudcollision.{h,cpp}` 示例。提供高效 C++ 扁平数组接口（`setPointCloudData`，避免 QVariant 装箱开销）和 QML 友好的 QVariant 接口（`addPointCloud` / `updatePointCloudPoints` / `setPointCloudColors`）。
 ## 架构
 
 ```

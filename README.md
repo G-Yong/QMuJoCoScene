@@ -12,6 +12,8 @@ https://github.com/user-attachments/assets/49a18818-608c-457d-b89a-a16b8b40a035
 
 ![snapshot](assets/snapshot.png)
 
+![snapshot](assets/pointCloud.png)
+
 ## Features
 
 - **Zero GLFW dependency**: `QtPlatformUIAdapter` replaces the official `GlfwAdapter`; all OpenGL context management and event handling are driven by Qt.
@@ -22,6 +24,8 @@ https://github.com/user-attachments/assets/49a18818-608c-457d-b89a-a16b8b40a035
 - **Drag-and-drop model loading**: Drop a `.xml` or `.mjb` file directly onto the window to hot-swap the model.
 - **Discrete GPU preference**: Exports `NvOptimusEnablement` / `AmdPowerXpressRequestHighPerformance` symbols so the driver automatically selects the discrete GPU on dual-GPU laptops.
 - **Object trajectory visualisation**: [`addTrajectory`](https://github.com/G-Yong/QMuJoCoScene/blob/master/src/MujocoQuickItem.h#L171) and [`setTrajectoryTrackedSite`](https://github.com/G-Yong/QMuJoCoScene/blob/master/src/MujocoQuickItem.h#L200) APIs let users create and manage trajectory objects from QML, providing real-time visualisation of body motion paths (dynamically updated each frame).
+- **Point cloud rendering**: High-performance point cloud visualisation via a GPU `GL_POINTS` overlay layer that shares MuJoCo's depth buffer (reverse-Z) for correct occlusion with scene geometry. Millions of points in a single draw call. Four render styles: `PointStylePixel` (fixed screen pixels), `PointStyleSquare` (world-size square), `PointStyleCircle` (world-size circle), `PointStyleSphere` (world-size sphere billboard with shading). Per-point colours, uniform colours, and ground reflections (matching MuJoCo's reflective floor).
+- **Point cloud collision detection**: Point cloud data is exposed to external collision libraries (e.g. [coal](https://github.com/coal-library/coal)) via thread-safe accessors such as `pointCloudPoints()`. Contact results from the external library are fed back into MuJoCo through `withMutableSimulation()`. See `demo/pointcloudcollision.{h,cpp}` for a complete example. Offers both a high-performance C++ flat-array API (`setPointCloudData`, avoiding QVariant boxing overhead) and a QML-friendly QVariant API (`addPointCloud` / `updatePointCloudPoints` / `setPointCloudColors`).
 
 ## Architecture
 
