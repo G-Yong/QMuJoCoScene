@@ -18,9 +18,18 @@
 #include <QDebug>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 namespace {
+
+// 每个穿透点的接触快照，注入 mjData.contact 供 MuJoCo 原生可视化与 ContactInfo 查询。
+struct PointSyntheticContact {
+    QVector3D pos;     // 接触点世界坐标
+    QVector3D normal;  // coal 法向（body 表面 → 点，朝外）
+    double    dist;    // 带符号距离：负值 = 穿透
+    int       geomId;  // body 首个 geom 的 MuJoCo id（-1 = 无）
+};
 
 // coal::DynamicAABBTreeCollisionManager 的碰撞回调适配器。
 // 子类化 CollisionCallBackBase，在其 collide() 中做窄相 + 力累积。
@@ -36,6 +45,9 @@ struct PointCloudCallback : coal::CollisionCallBackBase {
     coal::CollisionObject*        bodyObj;
     QVector3D&                    force;
     QVector3D&                    torque;
+    // 可选：收集穿透接触数据供后续注入 mjData（nullptr 时跳过收集）。
+    QVector<PointSyntheticContact>* synContacts  = nullptr;
+    int                             synBodyGeomId = -1;
 
     PointCloudCallback(const coal::CollisionRequest& req,
                        QVector<unsigned char>&       hf,
@@ -119,10 +131,27 @@ bool PointCloudCallback::collide(coal::CollisionObject* o1,
                        static_cast<float>(com[1]),
                        static_cast<float>(com[2]));
     torque += QVector3D::crossProduct(arm, F);
+
+    // 收集接触数据供注入 mjData.contact（可视化 / ContactInfo 查询）。
+    if (synContacts)
+        synContacts->append({cp, nrm, -overlap, synBodyGeomId});
+
     return false; // 继续遍历
 }
 
 } // namespace
+
+// 从接触法向构建 MuJoCo row-major 3×3 接触帧（行0=法向，行1/2=两切向）。
+static void buildMjContactFrame(const QVector3D& n, mjtNum frame[9])
+{
+    frame[0] = mjtNum(n.x()); frame[1] = mjtNum(n.y()); frame[2] = mjtNum(n.z());
+    const QVector3D aux = (qAbs(n.z()) < 0.9f) ? QVector3D(0.0f, 0.0f, 1.0f)
+                                                 : QVector3D(1.0f, 0.0f, 0.0f);
+    const QVector3D t1 = QVector3D::crossProduct(aux, n).normalized();
+    frame[3] = mjtNum(t1.x()); frame[4] = mjtNum(t1.y()); frame[5] = mjtNum(t1.z());
+    const QVector3D t2 = QVector3D::crossProduct(n, t1).normalized();
+    frame[6] = mjtNum(t2.x()); frame[7] = mjtNum(t2.y()); frame[8] = mjtNum(t2.z());
+}
 
 struct PointCloudCollision::Impl {
     MujocoQuickItem* item = nullptr;
@@ -316,6 +345,7 @@ void PointCloudCollision::update()
     const double sign = d->flip ? -1.0 : 1.0;
 
     d->item->withMutableSimulation([&](mjModel* m, mjData* dat) {
+        QVector<PointSyntheticContact> allSynContacts;
         for (auto it = d->bodies.begin(); it != d->bodies.end(); ++it) {
             CoalBodyEntry& be = it.value();
             if (be.bodyId < 0 || be.bodyId >= m->nbody || !be.object)
@@ -353,6 +383,9 @@ void PointCloudCollision::update()
                 PointCloudCallback cb(request, hitFlags, d->points, sign,
                                       vLin, com, d->k, d->c,
                                       be.object.get(), force, torque);
+                cb.synContacts   = &allSynContacts;
+                cb.synBodyGeomId = (be.bodyId > 0 && be.bodyId < m->nbody)
+                                   ? m->body_geomadr[be.bodyId] : -1;
                 d->bvhManager->collide(be.object.get(), &cb);
             }
 
@@ -361,6 +394,31 @@ void PointCloudCollision::update()
             mjtNum* f = dat->xfrc_applied + 6 * be.bodyId;
             f[0] = force.x();  f[1] = force.y();  f[2] = force.z();
             f[3] = torque.x(); f[4] = torque.y(); f[5] = torque.z();
+        }
+
+        // 4) 把惩罚力计算中的穿透点注入 mjData.contact。
+        //    物理已由 xfrc_applied 处理；此处仅为可视化 / MujocoQuickItem::contacts 查询。
+        //    efc_address=-1 让求解器跳过（不重复施力）；
+        //    exclude=0   让 mjv_updateScene 渲染接触点球（需开启 mjVIS_CONTACTPOINT）；
+        //    normalForce 将为 0（mj_contactForce 对 efc<0 返回零）。
+        for (const PointSyntheticContact& sc : qAsConst(allSynContacts)) {
+            if (dat->ncon >= m->nconmax)
+                break;
+            mjContact& mc = dat->contact[dat->ncon];
+            std::memset(&mc, 0, sizeof(mjContact));
+            mc.pos[0] = mjtNum(sc.pos.x());
+            mc.pos[1] = mjtNum(sc.pos.y());
+            mc.pos[2] = mjtNum(sc.pos.z());
+            buildMjContactFrame(sc.normal, mc.frame);
+            mc.dist        = mjtNum(sc.dist);
+            mc.geom[0]     = sc.geomId;   // body 的首个 mesh geom
+            mc.geom[1]     = -1;          // 点云点无对应 geom
+            mc.geom1       = sc.geomId;   // 兼容字段（已废弃）
+            mc.geom2       = -1;
+            mc.exclude     = 0;
+            mc.efc_address = -1;
+            mc.dim         = 3;
+            ++dat->ncon;
         }
     });
 

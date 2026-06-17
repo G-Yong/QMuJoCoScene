@@ -254,7 +254,8 @@ int main(int argc, char *argv[])
         }
 
         // 2) 碰撞参数：coal 点球半径略大于渲染点，保证 ball 不漏过点缝。
-        pcc.setPointRadius(0.008);        // 此时 cloudId 尚未设置，不会改渲染点尺寸
+        // PointRadius设置小一点的话，可以让碰撞更精确，但渲染点会变小。这里渲染点和碰撞点的半径不一样，碰撞点略大。
+        pcc.setPointRadius(0.0025);        // 此时 cloudId 尚未设置，不会改渲染点尺寸
         pcc.setStiffness(2500.0);
         pcc.setDamping(40.0);
 
