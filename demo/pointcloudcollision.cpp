@@ -53,6 +53,10 @@ struct PointCloudCollision::Impl {
     QVector4D hitColor  {1.0f, 0.2f, 0.15f, 1.0f};
 
     int cloudId = -1;    // MujocoQuickItem 里的点云 id
+    // 复用外部点云：>=0 时不自建渲染点云，highlight 时以 baseColors 为底色。
+    int externalCloudId = -1;
+    QVector<QVector4D> baseColors;  // 逐点底色（可空 => 用统一 baseColor）
+    QVector<unsigned char> prevHitFlags; // 上帧命中状态，仅变化时才上传颜色
 };
 
 PointCloudCollision::PointCloudCollision(QObject* parent)
@@ -68,6 +72,14 @@ void PointCloudCollision::setMujocoItem(MujocoQuickItem* item)
     d->item = item;
 }
 
+void PointCloudCollision::setRenderCloud(int cloudId, const QVector<QVector4D>& baseColors)
+{
+    d->externalCloudId = cloudId;
+    d->baseColors      = baseColors;
+    if (cloudId >= 0)
+        d->cloudId = cloudId;
+}
+
 // ---------------------------------------------------------------------------
 // 点云数据 / 渲染
 // ---------------------------------------------------------------------------
@@ -79,6 +91,12 @@ void PointCloudCollision::setPoints(const QVector<QVector3D>& worldPoints)
 
     if (!d->item)
         return;
+
+    // 复用外部点云时，渲染由调用方负责（本类只在 update() 里改命中点颜色）。
+    if (d->externalCloudId >= 0) {
+        d->cloudId = d->externalCloudId;
+        return;
+    }
 
     // 渲染：首次 addPointCloud，之后 updatePointCloudPoints。
     QVariantList list;
@@ -229,8 +247,10 @@ void PointCloudCollision::setupForLoadedScene()
     for (const QString& name : d->bodyNames)
         registerBodyMesh(name);
 
-    // 确保点云在新场景里渲染（cloudId 在 closeScene 后已失效）。
-    d->cloudId = -1;
+    // 复用外部点云时，cloudId 由调用方在重建点云后通过 setRenderCloud 提供，
+    // 这里不重置、也不自建。
+    if (d->externalCloudId < 0)
+        d->cloudId = -1;
     if (!d->points.isEmpty())
         setPoints(d->points);
 }
@@ -364,9 +384,17 @@ void PointCloudCollision::refreshRenderColors(const QVector<unsigned char>& hitF
 {
     if (!d->item || d->cloudId < 0 || hitFlags.size() != d->points.size())
         return;
+    // 点数可达几万，每帧重传整个颜色缓冲开销很大；仅在命中集变化时上传。
+    if (d->prevHitFlags == hitFlags)
+        return;
+    d->prevHitFlags = hitFlags;
+
+    const bool perPointBase = (d->baseColors.size() == d->points.size());
     QVariantList colors;
     colors.reserve(hitFlags.size());
-    for (unsigned char hit : hitFlags)
-        colors.append(QVariant::fromValue(hit ? d->hitColor : d->baseColor));
+    for (int i = 0; i < hitFlags.size(); ++i) {
+        const QVector4D base = perPointBase ? d->baseColors[i] : d->baseColor;
+        colors.append(QVariant::fromValue(hitFlags[i] ? d->hitColor : base));
+    }
     d->item->setPointCloudColors(d->cloudId, colors);
 }

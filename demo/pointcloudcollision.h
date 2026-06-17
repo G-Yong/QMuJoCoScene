@@ -52,6 +52,12 @@ public:
 
     void setMujocoItem(MujocoQuickItem* item);
 
+    // 复用一个已存在的渲染点云（由调用方用 addPointCloud/setPointCloudData 创建），
+    // 而不是本类自建。baseColors 为逐点底色（与点数一致）：未穿透点显示底色，
+    // 穿透点高亮 hitColor，从而既保留原始着色（如高度色）又能显示命中。
+    // 传 cloudId<0 关闭复用、恢复自建点云行为。需在每次场景重载、点云重建后调用。
+    void setRenderCloud(int cloudId, const QVector<QVector4D>& baseColors = {});
+
     // 设置点云（世界坐标）。重建 coal 点球与渲染点云；可随时调用更新数据。
     // 实际项目里把你自己的点云（相机/雷达）传进来即可。
     void setPoints(const QVector<QVector3D>& worldPoints);

@@ -21,6 +21,7 @@
 
 #include <QMatrix4x4>
 #include <QVector4D>
+#include <QVector3D>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -72,6 +73,12 @@ public:
     void drawCloud(int cloudId, int style, float pointSize,
                    const QVector4D& uniformColor);
 
+    // 绘制该点云关于平面 z=planeZ 的地面倒影：点被镜像到平面下方，
+    // 透明度乘以 alphaScale 后叠加到已渲染的地面上（深度测试关闭）。
+    void drawCloudReflected(int cloudId, int style, float pointSize,
+                            const QVector4D& uniformColor,
+                            float planeZ, float alphaScale);
+
     // 结束一帧：恢复必要的 GL 状态（解绑 program / VAO）。
     void endFrame();
 
@@ -102,6 +109,7 @@ private:
     QMatrix4x4 m_proj;
     int        m_viewportH = 0;
     float      m_projYY    = 1.0f; // proj[1][1]，世界尺寸 → 像素换算用
+    QVector3D  m_camPos;           // 当前帧相机世界坐标（倒影投影用）
 
     // uniform / attrib 位置缓存。
     int m_locMVP   = -1;
@@ -112,4 +120,8 @@ private:
     int m_locProjYY    = -1;
     int m_locUseUniformColor = -1;
     int m_locUniformColor    = -1;
+    int m_locAlphaScale      = -1;
+    int m_locReflect         = -1;
+    int m_locCamPos          = -1;
+    int m_locPlaneZ          = -1;
 };

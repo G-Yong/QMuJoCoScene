@@ -304,6 +304,12 @@ public:
     // 设置点尺寸：Pixel 样式为像素，其余样式为世界半径（米）。
     Q_INVOKABLE bool setPointCloudPointSize(int cloudId, float pointSize);
     Q_INVOKABLE bool setPointCloudStyle(int cloudId, PointCloudStyle style);
+    // 开关该点云的地面倒影（仿照 MuJoCo 反射地面）。enable=true 时额外画一遍
+    // 关于 z=planeZ 平面的镜像点云，透明度乘以 intensity（0~1，建议跟地面 reflectance 一致）。
+    // 点云是渲染叠加层，倒影同样不参与物理；planeZ 默认 0（地面高度）。
+    Q_INVOKABLE bool setPointCloudGroundReflection(int cloudId, bool enable,
+                                                  float planeZ = 0.0f,
+                                                  float intensity = 0.35f);
     Q_INVOKABLE int  pointCloudCount() const;
     Q_INVOKABLE int  pointCloudPointCount(int cloudId) const;
     // 线程安全地返回指定点云的全部点（世界坐标，QVariantList<QVector3D>），
@@ -738,6 +744,11 @@ private:
         std::vector<float> colors;       // rgba 扁平；空 => 用 rgba
         bool      dirtyPositions = true;
         bool      dirtyColors = true;
+        // 地面倒影：启用后额外画一遍关于 z=reflectionPlaneZ 平面的镜像点云，
+        // 透明度乘以 reflectionIntensity，叠加在带反射率的地面上。
+        bool      groundReflection = false;
+        float     reflectionPlaneZ = 0.0f;
+        float     reflectionIntensity = 0.35f;
     };
 
     mutable std::mutex             m_pointCloudMtx;

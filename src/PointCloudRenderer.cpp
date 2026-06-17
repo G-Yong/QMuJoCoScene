@@ -24,6 +24,11 @@
 #ifndef GL_POINTS
 #  define GL_POINTS 0x0000
 #endif
+// 兼容性 profile 下，gl_PointCoord 仅在启用点精灵后才会被填充；
+// 否则它恒为 (0,0)，圆/球样式着色器会把所有片元 discard（看不到任何东西）。
+#ifndef GL_POINT_SPRITE
+#  define GL_POINT_SPRITE 0x8861
+#endif
 
 namespace {
 
@@ -34,8 +39,9 @@ const char* kVertexShader = R"GLSL(
 #version 330
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec4 aColor;
-uniform mat4  uMVP;
-uniform mat4  uMV;
+uniform mat4  uMVP;            // proj * view（不含模型变换）
+uniform mat4  uMV;            // view
+uniform float uAlphaScale;     // 透明度缩放（倒影时 <1 用于淡化，否则 1）
 uniform int   uStyle;          // 0 pixel,1 square,2 circle,3 sphere
 uniform int   uOrtho;          // 1 正交
 uniform float uPointSize;      // pixel: 像素；其余: 世界半径(米)
@@ -43,11 +49,40 @@ uniform float uViewportH;
 uniform float uProjYY;         // 透视: 2n/(t-b)；正交: 2/(t-b)
 uniform bool  uUseUniformColor;
 uniform vec4  uUniformColor;
+// --- 倒影（屏幕空间平面反射）---
+uniform int   uReflect;        // 1 = 渲染地面倒影
+uniform vec3  uCamPos;         // 相机世界坐标（倒影投影用）
+uniform float uPlaneZ;         // 反射平面高度 z
 out vec4 vColor;
+out float vCull;               // >0 表示该点应被裁剪（倒影无效）
 void main() {
     vColor = uUseUniformColor ? uUniformColor : aColor;
-    vec4 viewPos = uMV * vec4(aPos, 1.0);
-    gl_Position  = uMVP * vec4(aPos, 1.0);
+    vColor.a *= uAlphaScale;
+    vCull = 0.0;
+
+    vec3 worldPos;
+    if (uReflect == 1) {
+        // 经典平面反射：点 P 在地面下的镜像 P'，相机看向 P' 的视线与地面
+        // z=uPlaneZ 的交点 F 就是该反射在地面上出现的位置。把带颜色的点画在
+        // F 处（地面深度），即可被前景物体的深度正确遮挡、且贴合不透明地面。
+        vec3 mirrored = vec3(aPos.xy, 2.0 * uPlaneZ - aPos.z);
+        vec3 dir = mirrored - uCamPos;
+        // 相机须在平面上方且视线确实向下穿过平面，否则倒影无效。
+        if (uCamPos.z <= uPlaneZ || dir.z >= -1e-6) {
+            vCull = 1.0;
+            worldPos = mirrored;            // 占位，后面会被裁剪
+        } else {
+            float t = (uPlaneZ - uCamPos.z) / dir.z;
+            worldPos = uCamPos + t * dir;   // 地面交点 F
+            // 轻微抬高，避免与地面 z-fighting（深度写关闭，仅做测试）。
+            worldPos.z += 1e-3;
+        }
+    } else {
+        worldPos = aPos;
+    }
+
+    vec4 viewPos = uMV * vec4(worldPos, 1.0);
+    gl_Position  = uMVP * vec4(worldPos, 1.0);
     if (uStyle == 0) {
         gl_PointSize = uPointSize;                       // 固定像素
     } else {
@@ -67,8 +102,10 @@ const char* kFragmentShader = R"GLSL(
 #version 330
 uniform int uStyle;
 in vec4 vColor;
+in float vCull;
 out vec4 fragColor;
 void main() {
+    if (vCull > 0.5) discard;                            // 无效倒影点
     if (uStyle == 0 || uStyle == 1) {
         fragColor = vColor;                              // pixel / square: 整片
     } else {
@@ -114,6 +151,10 @@ bool PointCloudRenderer::ensureProgram() {
     m_locProjYY          = prog->uniformLocation("uProjYY");
     m_locUseUniformColor = prog->uniformLocation("uUseUniformColor");
     m_locUniformColor    = prog->uniformLocation("uUniformColor");
+    m_locAlphaScale      = prog->uniformLocation("uAlphaScale");
+    m_locReflect         = prog->uniformLocation("uReflect");
+    m_locCamPos          = prog->uniformLocation("uCamPos");
+    m_locPlaneZ          = prog->uniformLocation("uPlaneZ");
     return true;
 }
 
@@ -207,6 +248,7 @@ void PointCloudRenderer::beginFrame(unsigned int targetFbo, int viewportW, int v
     auto* gl = ctx->extraFunctions();
 
     m_viewportH = viewportH;
+    m_camPos = QVector3D(camPos[0], camPos[1], camPos[2]);
 
     // --- 复制 MuJoCo render_gl3.c setView() 的投影/视图/深度约定 ---------
     // 视图矩阵：lookAt(pos, pos+forward, up)，再叠加 scene transform。
@@ -266,6 +308,8 @@ void PointCloudRenderer::beginFrame(unsigned int targetFbo, int viewportW, int v
     gl->glDepthMask(GL_TRUE);
     gl->glDepthRangef(0.0f, 1.0f);
     gl->glEnable(GL_PROGRAM_POINT_SIZE);
+    // 兼容 profile 下必须显式打开点精灵，gl_PointCoord 才有效（圆/球样式依赖它）。
+    gl->glEnable(GL_POINT_SPRITE);
     gl->glEnable(GL_MULTISAMPLE);
     gl->glEnable(GL_BLEND);
     gl->glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -276,6 +320,10 @@ void PointCloudRenderer::beginFrame(unsigned int targetFbo, int viewportW, int v
     m_program->setUniformValue(m_locViewportH, static_cast<float>(viewportH));
     m_program->setUniformValue(m_locProjYY, m_projYY);
     m_program->setUniformValue("uOrtho", orthographic ? 1 : 0);
+    // 默认不淡化、不做倒影；倒影绘制时由 drawCloudReflected 临时覆盖。
+    m_program->setUniformValue(m_locAlphaScale, 1.0f);
+    m_program->setUniformValue(m_locReflect, 0);
+    m_program->setUniformValue(m_locCamPos, m_camPos);
 }
 
 void PointCloudRenderer::drawCloud(int cloudId, int style, float pointSize,
@@ -296,11 +344,63 @@ void PointCloudRenderer::drawCloud(int cloudId, int style, float pointSize,
     gl->glBindVertexArray(0);
 }
 
+void PointCloudRenderer::drawCloudReflected(int cloudId, int style, float pointSize,
+                                            const QVector4D& uniformColor,
+                                            float planeZ, float alphaScale) {
+    if (!m_program) return;
+    auto it = m_clouds.find(cloudId);
+    if (it == m_clouds.end() || it->second.count <= 0) return;
+    const GpuCloud& c = it->second;
+
+    auto* gl = QOpenGLContext::currentContext()->extraFunctions();
+
+    // 屏幕空间平面反射：顶点着色器把每个点的镜像沿视线投影到地面 z=planeZ 上，
+    // 颜色画在地面交点处、深度等于该处地面深度。
+    gl->glEnable(GL_DEPTH_TEST);
+    gl->glDepthFunc(GL_GEQUAL);   // reverse-Z
+    gl->glDepthMask(GL_FALSE);    // 倒影不写深度（非真实几何）
+
+    // ---------------------------------------------------------------
+    // 透明度累积问题：密集点云（35000+点）中多个点投影到同一地面像素时，
+    // 标准 GL_SRC_ALPHA 混合会反复叠加，导致该像素趋向不透明（0.3^N → 1）。
+    // 解决方法：用模板缓冲令每个像素最多接受一次反射绘制。
+    //
+    // mjr_render 结束后模板缓冲已不再被 MuJoCo 使用，可安全清空并借用。
+    // 清空为 0 → 仅在模板=0 处绘制 → 绘制后写 1（后续点无法再覆盖同像素）。
+    // 结果：每个地面像素恰好混入一个反射点，透明度严格等于 alphaScale。
+    // ---------------------------------------------------------------
+    gl->glClear(GL_STENCIL_BUFFER_BIT);
+    gl->glEnable(GL_STENCIL_TEST);
+    gl->glStencilFunc(GL_EQUAL, 0, 0xFF);          // 仅在模板=0 处通过
+    gl->glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE); // 通过后写 1，禁止重复绘制
+    gl->glStencilMask(0xFF);
+
+    m_program->setUniformValue(m_locReflect, 1);
+    m_program->setUniformValue(m_locPlaneZ, planeZ);
+    m_program->setUniformValue(m_locCamPos, m_camPos);
+    m_program->setUniformValue(m_locAlphaScale, alphaScale);
+    m_program->setUniformValue(m_locStyle, style);
+    m_program->setUniformValue(m_locPointSize, pointSize > 0.0f ? pointSize : 1.0f);
+    m_program->setUniformValue(m_locUseUniformColor, !c.hasColors);
+    m_program->setUniformValue(m_locUniformColor, uniformColor);
+
+    gl->glBindVertexArray(c.vao);
+    gl->glDrawArrays(GL_POINTS, 0, c.count);
+    gl->glBindVertexArray(0);
+
+    // 还原：关闭倒影模式与模板测试、恢复深度写入与不淡化，供后续实点云正常绘制。
+    m_program->setUniformValue(m_locReflect, 0);
+    m_program->setUniformValue(m_locAlphaScale, 1.0f);
+    gl->glDisable(GL_STENCIL_TEST);
+    gl->glDepthMask(GL_TRUE);
+}
+
 void PointCloudRenderer::endFrame() {
     if (!m_program) return;
     auto* gl = QOpenGLContext::currentContext()->extraFunctions();
     m_program->release();
     gl->glDisable(GL_PROGRAM_POINT_SIZE);
+    gl->glDisable(GL_POINT_SPRITE);
     // 深度/混合等状态由下一帧 mjr_render 的 initGL3 重置，无需在此恢复。
 }
 

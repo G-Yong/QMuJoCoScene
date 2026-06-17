@@ -1,5 +1,4 @@
 #include "MujocoQuickItem.h"
-#include "coalcollision.h"
 #include "pointcloudcollision.h"
 #include "plyloader.h"
 
@@ -75,59 +74,84 @@ QVector4D heightColor(float t)
     return QVector4D(r, g, b, 1.0f);
 }
 
-// 加载 .ply 点云并作为点云图层加入 MuJoCo 视图。
-// Stanford bunny 是 Y-up，这里旋转到 MuJoCo 的 Z-up 并放大、平移到可见位置；
-// 该 ply 无颜色，按高度生成逐点颜色以演示彩色点云。返回 cloudId（失败 -1）。
-int addPlyPointCloud(MujocoQuickItem* mujoco, const QString& plyPath,
-                     float scale, const QVector3D& offset)
+// bunny 点云：加载结果（世界坐标点 + 逐点高度色 + 包围信息）。
+struct BunnyCloud {
+    int                cloudId = -1;     // MujocoView 里的渲染点云 id
+    QVector<QVector3D> points;           // 世界坐标点（供碰撞使用）
+    QVector<QVector4D> colors;           // 逐点高度色（底色）
+    QVector3D          center;           // XY 摆放中心
+    float              topZ = 0.0f;      // 点云顶部 z（用于在其上方投放小球）
+};
+
+// 加载 .ply 点云，转换到 MuJoCo 的 Z-up，放大并摆放：XY 居中到 centerXY，
+// 底部贴地（zmin=0）。创建一个 Circle 样式的彩色渲染点云并开启地面倒影。
+// bunny 无颜色，按高度生成逐点色。成功返回 true 并填充 out。
+bool setupBunnyPointCloud(MujocoQuickItem* mujoco, const QString& plyPath,
+                          float scale, const QVector3D& centerXY,
+                          float renderPointSize, BunnyCloud* out)
 {
     PlyCloud ply;
     QString err;
     if (!loadPly(plyPath, &ply, &err)) {
         qWarning() << "[ply] load failed:" << plyPath << err;
-        return -1;
+        return false;
     }
     qDebug() << "[ply] loaded" << ply.count << "points from" << plyPath
              << "hasColor=" << ply.hasColor;
 
     QVector<QVector3D> pts;
     pts.reserve(ply.count);
-    float zmin = 1e9f, zmax = -1e9f;
+    QVector3D vmin( 1e9f,  1e9f,  1e9f);
+    QVector3D vmax(-1e9f, -1e9f, -1e9f);
     for (int i = 0; i < ply.count; ++i) {
         const float x = ply.positions[3 * i + 0];
         const float y = ply.positions[3 * i + 1];
         const float z = ply.positions[3 * i + 2];
         // Y-up → Z-up：绕 X 轴 +90°，(x, y, z) → (x, -z, y)
         QVector3D p(x * scale, -z * scale, y * scale);
-        p += offset;
         pts.append(p);
-        zmin = std::min(zmin, p.z());
-        zmax = std::max(zmax, p.z());
+        vmin.setX(std::min(vmin.x(), p.x())); vmax.setX(std::max(vmax.x(), p.x()));
+        vmin.setY(std::min(vmin.y(), p.y())); vmax.setY(std::max(vmax.y(), p.y()));
+        vmin.setZ(std::min(vmin.z(), p.z())); vmax.setZ(std::max(vmax.z(), p.z()));
     }
+
+    // 摆放：XY 中心移到 centerXY，底部贴地（zmin → 0）。
+    const QVector3D mid((vmin.x() + vmax.x()) * 0.5f,
+                        (vmin.y() + vmax.y()) * 0.5f,
+                        0.0f);
+    const QVector3D shift(centerXY.x() - mid.x(),
+                          centerXY.y() - mid.y(),
+                          -vmin.z());
 
     QVector<float> positions;
     QVector<float> colors;
     positions.reserve(ply.count * 3);
     colors.reserve(ply.count * 4);
-    const float span = (zmax > zmin) ? (zmax - zmin) : 1.0f;
+    const float span = (vmax.z() > vmin.z()) ? (vmax.z() - vmin.z()) : 1.0f;
+    out->points.clear();
+    out->colors.clear();
+    out->points.reserve(ply.count);
+    out->colors.reserve(ply.count);
     for (int i = 0; i < pts.size(); ++i) {
-        const QVector3D& p = pts[i];
-        positions << p.x() << p.y() + 0.2 << p.z();
-        if (ply.hasColor) {
-            colors << ply.colors[4 * i + 0] << ply.colors[4 * i + 1]
-                   << ply.colors[4 * i + 2] << ply.colors[4 * i + 3];
-        } else {
-            const QVector4D c = heightColor((p.z() - zmin) / span);
-            colors << c.x() << c.y() << c.z() << c.w();
-        }
+        const QVector3D p = pts[i] + shift;
+        positions << p.x() << p.y() << p.z();
+        const QVector4D c = heightColor((pts[i].z() - vmin.z()) / span);
+        colors << c.x() << c.y() << c.z() << c.w();
+        out->points.append(p);
+        out->colors.append(c);
     }
 
-    // 用 Pixel 样式（固定屏幕像素）保证清晰可见；可改为 PointStyleCircle/Sphere。
-    const int cloudId = mujoco->addPointCloud(QVariantList(), 2.0f,
-                                              MujocoQuickItem::PointStylePixel,
+    const int cloudId = mujoco->addPointCloud(QVariantList(), renderPointSize,
+                                              MujocoQuickItem::PointStyleSquare,
                                               QVector4D(1, 1, 1, 1));
     mujoco->setPointCloudData(cloudId, positions, colors);
-    return cloudId;
+    // 地面倒影：与地面材质 reflectance(.2) 接近的强度。
+    mujoco->setPointCloudGroundReflection(cloudId, true, 0.0f, 0.2f);
+
+    out->cloudId = cloudId;
+    out->center  = QVector3D(centerXY.x(), centerXY.y(), 0.0f);
+    out->topZ    = vmax.z() - vmin.z();   // 贴地后顶部高度
+    return true;
 }
 } // namespace
 
@@ -211,65 +235,51 @@ int main(int argc, char *argv[])
         });
     }
 
-    CoalCollision coalCollision;
-    coalCollision.setMujocoItem(mujoco);
+    // ----------------------------------------------------------------------
+    // 点云碰撞演示：小球(ball, mesh body) vs bunny 点云。
+    // coal 计算 ball 网格 vs 各点球的穿透，惩罚力经 xfrc_applied 打回 MuJoCo；
+    // 命中的点高亮成红色，其余保留高度色。bunny 点云带地面倒影。
+    // ----------------------------------------------------------------------
+    PointCloudCollision pcc;
+    pcc.setMujocoItem(mujoco);
 
-    QObject::connect(mujoco, &MujocoQuickItem::sceneLoaded, view, [=, &coalCollision](const QString& source) {
-        // 绘制轨迹
-        auto tjId = mujoco->addTrajectory(1024,
-                              2.0,
-                              QVector4D(1.0f, 0.85f, 0.2f, 1.0f),
-                              true);
-        int bodyId = 0;
-        for (int i = 0; i < mujoco->objectCount(); ++i) {
-            auto info = mujoco->objectInfo(i);
-            qDebug() << "Body" << i << ":" << info.name;
-            if (info.name == "head") {
-                bodyId = i;
-                break;
-            }
+    QObject::connect(mujoco, &MujocoQuickItem::sceneLoaded, view, [=, &pcc](const QString& /*source*/) {
+        // 1) 加载并渲染 bunny 点云（彩色 Circle + 地面倒影）。
+        BunnyCloud bunny;
+        if (!setupBunnyPointCloud(mujoco,
+                                  QStringLiteral("../../../model/meshes/bunny.ply"),
+                                  3.0f, QVector3D(0.4f, 0.0f, 0.0f),
+                                  0.00035f, &bunny)) {
+            return;
         }
-        mujoco->setTrajectoryTrackedBody(tjId, bodyId, 0);
 
+        // 2) 碰撞参数：coal 点球半径略大于渲染点，保证 ball 不漏过点缝。
+        pcc.setPointRadius(0.008);        // 此时 cloudId 尚未设置，不会改渲染点尺寸
+        pcc.setStiffness(2500.0);
+        pcc.setDamping(40.0);
 
-        coalCollision.setupCoalForLoadedScene();
-        coalCollision.setCoalSecurityMargin(0.00);
-        coalCollision.setCoalNormalFlip(false);
-        coalCollision.addCoalPair("ball", "slide");
+        // 3) 复用彩色渲染点云做命中高亮（保留高度色），并接入碰撞。
+        pcc.setRenderCloud(bunny.cloudId, bunny.colors);
+        pcc.setPoints(bunny.points);
+        pcc.addCollisionBody("ball");
+        pcc.setupForLoadedScene();
 
-        // 加载 bunny.ply 点云并渲染（GPU GL_POINTS 叠加层，按高度着色）。
-        // 放大 3 倍、平移到 (0.4, 0, 0) 处，使其在场景中清晰可见。
-        addPlyPointCloud(mujoco, QStringLiteral("../../../model/meshes/bunny.ply"),
-                         3.0f, QVector3D(0.4f, 0.0f, 0.0f));
-     });
+        // 4) 把小球放到 bunny 上方，让它落到点云上演示碰撞。
+        int ballId = -1;
+        for (int i = 0; i < mujoco->objectCount(); ++i) {
+            if (mujoco->objectInfo(i).name == QStringLiteral("ball")) { ballId = i; break; }
+        }
+        if (ballId >= 0) {
+            mujoco->setObjectPosition(
+                ballId, QVector3D(bunny.center.x(), bunny.center.y(),
+                                  bunny.topZ + 0.2f));
+        }
+    });
 
-    // // ----------------------------------------------------------------------
-    // // 点云碰撞示例：coal(body 网格 vs 点云) → 惩罚力 xfrc_applied 打入 MuJoCo。
-    // // 实际项目里把 setPoints(...) 换成你自己的点云数据即可。
-    // // ----------------------------------------------------------------------
-    // PointCloudCollision pcc;
-    // pcc.setMujocoItem(mujoco);
-
-    // QObject::connect(mujoco, &MujocoQuickItem::sceneLoaded, view, [=, &pcc](const QString& /*source*/) {
-    //     pcc.addCollisionBody("ball");   // ball 是 mesh body，可被 coal 提取网格
-    //     pcc.setPointRadius(0.01);
-    //     pcc.setStiffness(3000.0);
-    //     pcc.setDamping(30.0);
-
-    //     // 演示点云：一片水平点阵（实际中替换为你的传感器点云）。
-    //     QVector<QVector3D> demoCloud;
-    //     for (int ix = -8; ix <= 8; ++ix)
-    //         for (int iy = -8; iy <= 8; ++iy)
-    //             demoCloud.append(QVector3D(ix * 0.02f, iy * 0.02f, 0.12f));
-    //     pcc.setPoints(demoCloud);
-
-    //     pcc.setupForLoadedScene();
-    // });
-
-    // // 周期性驱动点云碰撞注入（~120Hz）。
-    // QTimer* pccTimer = new QTimer(view);
-    // QObject::connect(pccTimer, &QTimer::timeout, &pcc, &PointCloudCollision::update);
-    // pccTimer->start(8);
+    // 周期性驱动点云碰撞注入（~120Hz）。
+    QTimer* pccTimer = new QTimer(view);
+    QObject::connect(pccTimer, &QTimer::timeout, &pcc, &PointCloudCollision::update);
+    pccTimer->start(8);
 
     return app.exec();
 }

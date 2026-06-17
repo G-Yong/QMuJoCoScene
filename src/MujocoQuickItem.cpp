@@ -28,6 +28,7 @@
 #include <QDir>
 
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1097,6 +1098,18 @@ bool MujocoQuickItem::setPointCloudStyle(int cloudId, PointCloudStyle style) {
     return true;
 }
 
+bool MujocoQuickItem::setPointCloudGroundReflection(int cloudId, bool enable,
+                                                    float planeZ, float intensity) {
+    std::lock_guard<std::mutex> lk(m_pointCloudMtx);
+    PointCloudState* pc = findPointCloud(cloudId);
+    if (!pc) return false;
+    pc->groundReflection    = enable;
+    pc->reflectionPlaneZ    = planeZ;
+    pc->reflectionIntensity = std::clamp(intensity, 0.0f, 1.0f);
+    requestRenderUpdate();
+    return true;
+}
+
 int MujocoQuickItem::pointCloudCount() const {
     std::lock_guard<std::mutex> lk(m_pointCloudMtx);
     return static_cast<int>(m_pointClouds.size());
@@ -1135,7 +1148,8 @@ QVariantList MujocoQuickItem::pointCloudPoints(int cloudId) const {
 void MujocoQuickItem::onRenderOverlay(unsigned int targetFbo, int viewWidth, int viewHeight) {
     if (!m_sim || viewWidth <= 0 || viewHeight <= 0) return;
 
-    struct DrawItem { int id; int style; float size; QVector4D color; bool visible; };
+    struct DrawItem { int id; int style; float size; QVector4D color; bool visible;
+                      bool reflect; float planeZ; float reflectIntensity; };
     std::vector<DrawItem> draws;
     std::vector<int> ids;
     bool anyVisible = false;
@@ -1161,7 +1175,9 @@ void MujocoQuickItem::onRenderOverlay(unsigned int targetFbo, int viewWidth, int
                     pc.id, pc.colors.empty() ? nullptr : pc.colors.data(), ccount);
                 pc.dirtyColors = false;
             }
-            draws.push_back({pc.id, pc.style, pc.pointSize, pc.rgba, pc.visible});
+            draws.push_back({pc.id, pc.style, pc.pointSize, pc.rgba, pc.visible,
+                             pc.groundReflection, pc.reflectionPlaneZ,
+                             pc.reflectionIntensity});
             if (pc.visible && !pc.positions.empty()) anyVisible = true;
         }
         m_pointRenderer->retainOnly(ids);
@@ -1178,6 +1194,17 @@ void MujocoQuickItem::onRenderOverlay(unsigned int targetFbo, int viewWidth, int
         cam.frustum_center, cam.frustum_width, cam.frustum_bottom, cam.frustum_top,
         cam.frustum_near, cam.frustum_far, cam.orthographic != 0,
         scn.enabletransform != 0, scn.translate, scn.rotate, scn.scale);
+    // 先画倒影，再画实点云盖在上面。
+    // 跟随 MuJoCo 的 mjRND_REFLECTION 标志：场景 UI 关闭 "Reflections" 时
+    // 同步不渲染点云倒影，与 MuJoCo 内置几何反射的开关保持一致。
+    const bool mujocoReflectionOn = (scn.flags[mjRND_REFLECTION] != 0);
+    if (mujocoReflectionOn) {
+        for (const DrawItem& it : draws) {
+            if (!it.visible || !it.reflect) continue;
+            m_pointRenderer->drawCloudReflected(it.id, it.style, it.size, it.color,
+                                                it.planeZ, it.reflectIntensity);
+        }
+    }
     for (const DrawItem& it : draws) {
         if (!it.visible) continue;
         m_pointRenderer->drawCloud(it.id, it.style, it.size, it.color);
