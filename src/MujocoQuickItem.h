@@ -436,6 +436,16 @@ public:
     // 按关节名称设置单自由度值，内部查找 joint index 后调用 setJointValue。
     // 仅适用于 hinge / slide 关节。
     Q_INVOKABLE bool setJointValueByName(const QString& name, double value);
+    // 以扁平 QVariantList 读取全部关节的 qpos 值（按 qpos 顺序拼接）。
+    // 长度 = m->nq；场景未加载时返回空列表。
+    Q_INVOKABLE QVariantList joints() const;
+    // 以扁平 QVariantList 批量写入全部关节的 qpos 值。
+    // values 长度须与 m->nq 一致。返回是否成功写入。
+    Q_INVOKABLE bool        setJoints(const QVariantList& values);
+    // 同步写入全部关节 qpos 值 + 执行 mj_forward + 返回当前接触快照。
+    // 写入失败时返回空列表；成功时以 QVariantList<ContactInfo> 返回接触。
+    // 同时会把接触快照投递到 GUI 线程更新 m_contactSnapshot 并发 contactsChanged。
+    Q_INVOKABLE QVariantList setJointsAndDetect(const QVariantList& values);
 
     // ------------------------------------------------------------------
     // 驱动器控制接口

@@ -2320,6 +2320,63 @@ bool MujocoQuickItem::setJointValueByName(const QString& name, double value)
     return applied;
 }
 
+QVariantList MujocoQuickItem::joints() const
+{
+    QVariantList result;
+    withSimulation([&](const mjModel* m, mjData* d) {
+        result.reserve(static_cast<int>(m->nq));
+        for (int i = 0; i < static_cast<int>(m->nq); ++i)
+            result.append(d->qpos[i]);
+    });
+    return result;
+}
+
+bool MujocoQuickItem::setJoints(const QVariantList& values)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_) return;
+        const int nq = static_cast<int>(sim.m_->nq);
+        if (values.size() != nq) return;
+        for (int i = 0; i < nq; ++i)
+            sim.qpos_[i] = values[i].toDouble();
+        sim.pending_.ui_update_simulation = true;
+        applied = true;
+    });
+    return applied;
+}
+
+QVariantList MujocoQuickItem::setJointsAndDetect(const QVariantList& values)
+{
+    QVariantList result;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_) return;
+        const int nq = static_cast<int>(sim.m_->nq);
+        if (values.size() != nq) return;
+        // 写入 qpos_ 和 d->qpos，确保 mj_forward 读取最新值
+        for (int i = 0; i < nq; ++i) {
+            sim.qpos_[i] = values[i].toDouble();
+            sim.d_->qpos[i] = sim.qpos_[i];
+        }
+        // 同步执行前向运动学：更新所有 body 世界位姿 + 碰撞检测
+        mj_forward(sim.m_, sim.d_);
+        // 构建接触快照
+        QList<ContactInfo> contacts = buildContactSnapshot(sim.m_, sim.d_);
+        result.reserve(contacts.size());
+        for (const auto& c : contacts)
+            result.append(QVariant::fromValue(c));
+        // 异步推送快照到 GUI 线程，保持 contactCount()/contacts() 一致
+        QMetaObject::invokeMethod(this, [this, contacts = std::move(contacts)] {
+            if (!sameContactSnapshot(m_contactSnapshot, contacts)) {
+                m_contactSnapshot = contacts;
+                emit contactsChanged();
+            }
+        }, Qt::QueuedConnection);
+        sim.pending_.ui_update_simulation = true;
+    });
+    return result;
+}
+
 // ---------------------------------------------------------------------------
 // 驱动器控制接口
 // ---------------------------------------------------------------------------
