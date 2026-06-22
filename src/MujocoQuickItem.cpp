@@ -138,10 +138,9 @@ MujocoQuickItem::MujocoQuickItem(QQuickItem* parent)
 }
 
 MujocoQuickItem::~MujocoQuickItem() {
-    // 若本实例仍持有外部窄阶段接入，先恢复全局碰撞函数表，避免 closeScene
-    // 之后留下指向已析构实例的全局回调。
-    if (s_narrowPhaseHost == this)
-        setExternalNarrowPhase(nullptr, nullptr);
+    // 若本实例仍持有外部窄阶段接入，先注销（并在本实例是最后一个时
+    // 恢复全局碰撞函数表），避免 closeScene 之后留下指向已析构实例的全局回调。
+    setExternalNarrowPhase(nullptr, nullptr);
     closeScene();
 }
 
@@ -2031,8 +2030,22 @@ BodyMeshData MujocoQuickItem::bodyCollisionMesh(int bodyId) const
 // ---------------------------------------------------------------------------
 // 外部窄阶段碰撞接入
 // ---------------------------------------------------------------------------
-MujocoQuickItem* MujocoQuickItem::s_narrowPhaseHost   = nullptr;
-void*            MujocoQuickItem::s_origMeshCollisionFn = nullptr;
+std::vector<MujocoQuickItem*> MujocoQuickItem::s_narrowPhaseHosts;
+std::mutex                    MujocoQuickItem::s_narrowPhaseMutex;
+void*                         MujocoQuickItem::s_origMeshCollisionFn = nullptr;
+
+MujocoQuickItem* MujocoQuickItem::hostForModel(const mjModel* m)
+{
+    if (!m) return nullptr;
+    std::lock_guard<std::mutex> lk(s_narrowPhaseMutex);
+    for (MujocoQuickItem* h : s_narrowPhaseHosts) {
+        // 每个实例拥有独立的 mjModel/mjData；当前正在碰撞的 m 唯一对应其中一个
+        // 实例（即正在 step/forward 的那一个，必然存活）。
+        if (h && h->m_sim && h->m_sim->m_ == m)
+            return h;
+    }
+    return nullptr;
+}
 
 namespace {
 // 返回 body 的第一个 mesh geom 的 geom id；无则 -1。用于多 geom body 去重：
@@ -2055,7 +2068,10 @@ int MujocoQuickItem::externalMeshCollisionThunk(const mjModel* m, mjData* d,
                                                 mjContact* con, int g1, int g2,
                                                 double margin)
 {
-    MujocoQuickItem* host = s_narrowPhaseHost;
+    // 全局表是进程级的，被 patch 后所有实例的 mesh×mesh 都会走到这里；
+    // 按传入的 mjModel* 反查安装了外部窄阶段的对应实例，未安装或不匹配
+    // 的实例回退到 MuJoCo 原始 mesh 碰撞。
+    MujocoQuickItem* host = hostForModel(m);
     auto fallback = [&]() -> int {
         if (s_origMeshCollisionFn) {
             auto fn = reinterpret_cast<mjfCollision>(s_origMeshCollisionFn);
@@ -2125,7 +2141,13 @@ void MujocoQuickItem::setExternalNarrowPhase(ExternalPairFilter filter,
         if (filter && provider) {
             m_extPairFilter  = std::move(filter);
             m_extNarrowPhase = std::move(provider);
-            s_narrowPhaseHost = this;
+            std::lock_guard<std::mutex> lk(s_narrowPhaseMutex);
+            // 注册本实例（去重）。
+            if (std::find(s_narrowPhaseHosts.begin(), s_narrowPhaseHosts.end(), this)
+                    == s_narrowPhaseHosts.end()) {
+                s_narrowPhaseHosts.push_back(this);
+            }
+            // 第一个安装者负责 patch 全局表（只 patch 一次）。
             if (!s_origMeshCollisionFn) {
                 s_origMeshCollisionFn =
                     reinterpret_cast<void*>(mjCOLLISIONFUNC[mjGEOM_MESH][mjGEOM_MESH]);
@@ -2133,19 +2155,22 @@ void MujocoQuickItem::setExternalNarrowPhase(ExternalPairFilter filter,
                     reinterpret_cast<mjfCollision>(&MujocoQuickItem::externalMeshCollisionThunk);
             }
         } else {
-            // 卸载：恢复原始 mesh 碰撞函数。
-            if (s_origMeshCollisionFn) {
+            // 卸载：从注册表移除本实例；最后一个卸载者恢复原始 mesh 碰撞函数。
+            m_extPairFilter  = nullptr;
+            m_extNarrowPhase = nullptr;
+            std::lock_guard<std::mutex> lk(s_narrowPhaseMutex);
+            s_narrowPhaseHosts.erase(
+                std::remove(s_narrowPhaseHosts.begin(), s_narrowPhaseHosts.end(), this),
+                s_narrowPhaseHosts.end());
+            if (s_narrowPhaseHosts.empty() && s_origMeshCollisionFn) {
                 mjCOLLISIONFUNC[mjGEOM_MESH][mjGEOM_MESH] =
                     reinterpret_cast<mjfCollision>(s_origMeshCollisionFn);
                 s_origMeshCollisionFn = nullptr;
             }
-            m_extPairFilter  = nullptr;
-            m_extNarrowPhase = nullptr;
-            if (s_narrowPhaseHost == this) s_narrowPhaseHost = nullptr;
         }
     };
 
-    // 安装/卸载必须与物理线程串行：在 sim.mtx 锁内换入/换出。
+    // 安装/卸载必须与本实例物理线程串行：在 sim.mtx 锁内换入/换出。
     if (m_sim) {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
         apply();
@@ -2156,7 +2181,9 @@ void MujocoQuickItem::setExternalNarrowPhase(ExternalPairFilter filter,
 
 bool MujocoQuickItem::externalNarrowPhaseInstalled() const
 {
-    return s_narrowPhaseHost == this
+    std::lock_guard<std::mutex> lk(s_narrowPhaseMutex);
+    return std::find(s_narrowPhaseHosts.begin(), s_narrowPhaseHosts.end(), this)
+               != s_narrowPhaseHosts.end()
         && static_cast<bool>(m_extPairFilter)
         && static_cast<bool>(m_extNarrowPhase);
 }

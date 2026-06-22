@@ -384,8 +384,9 @@ public:
     //
     // 线程：filter / provider 在 MuJoCo 物理线程内、持 sim.mtx 锁时被调用，必须
     // 轻量且不得再次加锁 sim.mtx。安装/卸载本身也在 sim.mtx 锁内完成，与物理
-    // 线程串行化。注意 mjCOLLISIONFUNC 是进程级全局表，假定同时只有一个
-    // MujocoQuickItem 安装外部窄阶段（单实例）。
+    // 线程串行化。mjCOLLISIONFUNC 是进程级全局表，但每个 MujocoQuickItem 拥有
+    // 独立的 mjModel/mjData；跳板按传入的 mjModel* 反查所属实例，因此可同时存在
+    // 多个实例各自安装外部窄阶段（全局表只 patch 一次，引用计数式恢复）。
     //
     // 限制：当前仅拦截 mesh×mesh；被接管的 body 应为纯 mesh geom。
     // ------------------------------------------------------------------
@@ -790,8 +791,14 @@ private:
     static int externalMeshCollisionThunk(const mjModel* m, mjData* d,
                                           mjContact* con, int g1, int g2,
                                           double margin);
-    // 当前安装了外部窄阶段的实例（mjCOLLISIONFUNC 是全局表，假定单实例）。
-    static MujocoQuickItem* s_narrowPhaseHost;
-    // 被替换前的原始 mesh×mesh 碰撞函数（mjfCollision），卸载时恢复。
-    static void*            s_origMeshCollisionFn;
+    // 按传入的 mjModel* 在 s_narrowPhaseHosts 中反查对应实例；找不到返回 nullptr。
+    static MujocoQuickItem* hostForModel(const mjModel* m);
+    // 所有已安装外部窄阶段的实例。mjCOLLISIONFUNC 是进程级全局表，只 patch
+    // 一次；跳板按传入的 mjModel* 在此表中匹配到对应实例，支持多实例并存。
+    static std::vector<MujocoQuickItem*> s_narrowPhaseHosts;
+    // 保护 s_narrowPhaseHosts / s_origMeshCollisionFn 的全局锁（跳板与安装/卸载
+    // 可能来自不同实例的不同线程）。
+    static std::mutex                    s_narrowPhaseMutex;
+    // 被替换前的原始 mesh×mesh 碰撞函数（mjfCollision），最后一个实例卸载时恢复。
+    static void*                         s_origMeshCollisionFn;
 };
