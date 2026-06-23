@@ -310,8 +310,8 @@ public:
     Q_INVOKABLE bool setPointCloudGroundReflection(int cloudId, bool enable,
                                                   float planeZ = 0.0f,
                                                   float intensity = 0.35f);
-    Q_INVOKABLE int  pointCloudCount() const;
-    Q_INVOKABLE int  pointCloudPointCount(int cloudId) const;
+    Q_INVOKABLE int pointCloudCount() const;
+    Q_INVOKABLE int pointCloudPointCount(int cloudId) const;
     // 线程安全地返回指定点云的全部点（世界坐标，QVariantList<QVector3D>），
     // 供 coal 等外部碰撞库读取；cloudId 不存在时返回空列表。
     Q_INVOKABLE QVariantList pointCloudPoints(int cloudId) const;
@@ -420,7 +420,7 @@ public:
     // ------------------------------------------------------------------
 
     // 返回当前场景的关节数量；场景未加载时返回 0。
-    Q_INVOKABLE int       jointCount() const;
+    Q_INVOKABLE int jointCount() const;
     // 返回第 index 个关节的固有属性；index 越界时返回默认构造的空结构。
     Q_INVOKABLE JointInfo jointInfo(int index) const;
     // 读取第 index 个关节的当前 qpos 值（列表长度 = qposDim）。
@@ -437,12 +437,20 @@ public:
     // 按关节名称设置单自由度值，内部查找 joint index 后调用 setJointValue。
     // 仅适用于 hinge / slide 关节。
     Q_INVOKABLE bool setJointValueByName(const QString& name, double value);
+    // 设置关节在父 body 局部坐标系中的锚点位置（修改 mjModel::jnt_pos）。
+    // 仅对 hinge / slide / ball 关节有效；free joint 的 pos 无意义，返回 false。
+    // 写入后自动调用 mj_forward 更新运动学。
+    Q_INVOKABLE bool setJointAnchorPos(int index, const QVector3D& pos);
+    // 设置关节在父 body 局部坐标系中的旋转/滑动轴方向（修改 mjModel::jnt_axis）。
+    // 仅对 hinge / slide 关节有效；free / ball 关节的 axis 无意义，返回 false。
+    // 传入向量会自动归一化。
+    Q_INVOKABLE bool setJointAxis(int index, const QVector3D& axis);
     // 以扁平 QVariantList 读取全部关节的 qpos 值（按 qpos 顺序拼接）。
     // 长度 = m->nq；场景未加载时返回空列表。
     Q_INVOKABLE QVariantList joints() const;
     // 以扁平 QVariantList 批量写入全部关节的 qpos 值。
     // values 长度须与 m->nq 一致。返回是否成功写入。
-    Q_INVOKABLE bool        setJoints(const QVariantList& values);
+    Q_INVOKABLE bool setJoints(const QVariantList& values);
     // 同步写入全部关节 qpos 值 + 执行 mj_forward + 返回当前接触快照。
     // 写入失败时返回空列表；成功时以 QVariantList<ContactInfo> 返回接触。
     // 同时会把接触快照投递到 GUI 线程更新 m_contactSnapshot 并发 contactsChanged。
@@ -457,22 +465,22 @@ public:
     // d->ctrl 并标记 pending 刷新。
 
     // 返回驱动器数量；场景未加载时返回 0。
-    Q_INVOKABLE int         actuatorCount() const;
+    Q_INVOKABLE int actuatorCount() const;
     // 返回第 index 个驱动器的固有属性；index 越界返回空结构。
     Q_INVOKABLE ActuatorInfo actuatorInfo(int index) const;
     // 按名称查找驱动器下标（-1 表示未找到）。
-    Q_INVOKABLE int         actuatorIndex(const QString& name) const;
+    Q_INVOKABLE int actuatorIndex(const QString& name) const;
     // 读取第 index 个驱动器的当前 ctrl 值；场景未加载或越界返回 NaN。
-    Q_INVOKABLE double      control(int index) const;
+    Q_INVOKABLE double control(int index) const;
     // 设置第 index 个驱动器的 ctrl 值；返回是否成功写入。
-    Q_INVOKABLE bool        setControl(int index, double value);
+    Q_INVOKABLE bool setControl(int index, double value);
     // 按名称设置 ctrl 值；返回是否找到并写入。
-    Q_INVOKABLE bool        setControlByName(const QString& name, double value);
+    Q_INVOKABLE bool setControlByName(const QString& name, double value);
     // 以 QVariantList 读取全部 ctrl 值。
     Q_INVOKABLE QVariantList controls() const;
     // 批量设置 ctrl 值；values 长度须与 actuatorCount() 一致。
     // 返回是否成功写入（false = 场景未加载或长度不匹配）。
-    Q_INVOKABLE bool        setControls(const QVariantList& values);
+    Q_INVOKABLE bool setControls(const QVariantList& values);
 
     Q_INVOKABLE bool toggleSimulationRunning();
     Q_INVOKABLE bool stepSimulationForward();

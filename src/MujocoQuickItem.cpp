@@ -2347,6 +2347,45 @@ bool MujocoQuickItem::setJointValueByName(const QString& name, double value)
     return applied;
 }
 
+bool MujocoQuickItem::setJointAnchorPos(int index, const QVector3D& pos)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_) return;
+        if (!isValidIndex(index, static_cast<int>(sim.m_->njnt))) return;
+        int type = sim.m_->jnt_type[index];
+        if (type == mjJNT_FREE) return;  // free joint pos 无意义
+        mjtNum* jpos = sim.m_->jnt_pos + 3 * index;
+        jpos[0] = static_cast<mjtNum>(pos.x());
+        jpos[1] = static_cast<mjtNum>(pos.y());
+        jpos[2] = static_cast<mjtNum>(pos.z());
+        mj_forward(sim.m_, sim.d_);
+        markUiRefresh(sim);
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setJointAxis(int index, const QVector3D& axis)
+{
+    QVector3D n = axis.normalized();
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_) return;
+        if (!isValidIndex(index, static_cast<int>(sim.m_->njnt))) return;
+        int type = sim.m_->jnt_type[index];
+        if (type != mjJNT_SLIDE && type != mjJNT_HINGE) return;  // free/ball 没有 axis
+        mjtNum* jaxis = sim.m_->jnt_axis + 3 * index;
+        jaxis[0] = static_cast<mjtNum>(n.x());
+        jaxis[1] = static_cast<mjtNum>(n.y());
+        jaxis[2] = static_cast<mjtNum>(n.z());
+        mj_forward(sim.m_, sim.d_);
+        markUiRefresh(sim);
+        applied = true;
+    });
+    return applied;
+}
+
 QVariantList MujocoQuickItem::joints() const
 {
     QVariantList result;
