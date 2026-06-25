@@ -485,6 +485,11 @@ public:
     Q_INVOKABLE bool toggleSimulationRunning();
     Q_INVOKABLE bool stepSimulationForward();
     Q_INVOKABLE bool stepSimulationBackward();
+
+
+    // 全量物理复位（mj_resetData + mj_forward）：
+    //   关节位置 → qpos0，关节速度 → 0，执行器/控制 → act0/0，
+    //   外力 → 0，接触 → 清空，时间/能量 → 归零。
     Q_INVOKABLE bool resetSimulation();
     Q_INVOKABLE bool zeroControls();
     Q_INVOKABLE bool setKeyframeIndex(int index);
