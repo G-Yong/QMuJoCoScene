@@ -39,5 +39,9 @@ INCLUDEPATH += $$PWD/../thirdparty/eigen3_x64-windows/include/eigen3
 INCLUDEPATH += $$PWD/../thirdparty/boost-math_x64-windows/include
 # assimp 已通过 coal 内部链接，无需在本项目中单独引入头文件或库。
 # 运行时仍需 assimp-vc142-mt.dll 部署在可执行文件同目录（coal 依赖）。
-LIBS += -L$$PWD/../thirdparty/coal/lib -lcoal
+CONFIG(debug, debug|release) {
+    LIBS += -L$$PWD/../thirdparty/coal/debug/lib -lcoald
+} else {
+    LIBS += -L$$PWD/../thirdparty/coal/lib -lcoal
+}
 LIBS += -L$$PWD/../thirdparty/bin
