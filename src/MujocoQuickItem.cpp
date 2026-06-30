@@ -2403,8 +2403,10 @@ bool MujocoQuickItem::setJoints(const QVariantList& values)
     withSimulateLocked([&](mujoco::Simulate& sim) {
         if (!sim.m_ || !sim.d_) return;
         const int nq = static_cast<int>(sim.m_->nq);
-        if (values.size() != nq) return;
-        for (int i = 0; i < nq; ++i)
+        // 允许只传入部分关节值：只写入前 count 个 qpos，其余保持当前值不变。
+        const int count = qMin(static_cast<int>(values.size()), nq);
+        if (count <= 0) return;
+        for (int i = 0; i < count; ++i)
             sim.qpos_[i] = values[i].toDouble();
         sim.pending_.ui_update_simulation = true;
         applied = true;
@@ -2418,9 +2420,11 @@ QVariantList MujocoQuickItem::setJointsAndDetect(const QVariantList& values)
     withSimulateLocked([&](mujoco::Simulate& sim) {
         if (!sim.m_ || !sim.d_) return;
         const int nq = static_cast<int>(sim.m_->nq);
-        if (values.size() != nq) return;
+        // 允许只传入部分关节值：只写入前 count 个 qpos，其余保持当前值不变。
+        const int count = qMin(static_cast<int>(values.size()), nq);
+        if (count <= 0) return;
         // 写入 qpos_ 和 d->qpos，确保 mj_forward 读取最新值
-        for (int i = 0; i < nq; ++i) {
+        for (int i = 0; i < count; ++i) {
             sim.qpos_[i] = values[i].toDouble();
             sim.d_->qpos[i] = sim.qpos_[i];
         }

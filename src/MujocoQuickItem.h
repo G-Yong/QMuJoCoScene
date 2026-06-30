@@ -448,11 +448,14 @@ public:
     // 以扁平 QVariantList 读取全部关节的 qpos 值（按 qpos 顺序拼接）。
     // 长度 = m->nq；场景未加载时返回空列表。
     Q_INVOKABLE QVariantList joints() const;
-    // 以扁平 QVariantList 批量写入全部关节的 qpos 值。
-    // values 长度须与 m->nq 一致。返回是否成功写入。
+    // 以扁平 QVariantList 批量写入关节的 qpos 值。
+    // 支持部分写入：若 values 长度小于 m->nq，则只写入前 values.size() 个 qpos，
+    // 其余保持当前值不变；长度超过 m->nq 时多余部分被忽略。返回是否成功写入。
     Q_INVOKABLE bool setJoints(const QVariantList& values);
-    // 同步写入全部关节 qpos 值 + 执行 mj_forward + 返回当前接触快照。
-    // 写入失败时返回空列表；成功时以 QVariantList<ContactInfo> 返回接触。
+    // 同步写入关节 qpos 值 + 执行 mj_forward + 返回当前接触快照。
+    // 支持部分写入：只写入前 min(values.size(), m->nq) 个 qpos，其余保持不变。
+    // 写入失败（模型未加载或 values 为空）时返回空列表；成功时以
+    // QVariantList<ContactInfo> 返回接触（无碰撞时也为空列表）。
     // 同时会把接触快照投递到 GUI 线程更新 m_contactSnapshot 并发 contactsChanged。
     Q_INVOKABLE QVariantList setJointsAndDetect(const QVariantList& values);
 
