@@ -3079,30 +3079,26 @@ void MujocoQuickItem::mousePressEvent(QMouseEvent* e) {
     forceActiveFocus();
     if (!m_adapterRaw) { QQuickFramebufferObject::mousePressEvent(e); return; }
     updateModifiersFrom(int(e->modifiers()));
-    qreal dpr = window() ? window()->devicePixelRatio() : 1.0;
     m_adapterRaw->PostMouseButton(qtMouseButtonToInternal(int(e->button())), 1,
-                                  e->pos().x() * dpr, e->pos().y() * dpr);
+                                  e->pos().x(), e->pos().y());
     e->accept();
 }
 void MujocoQuickItem::mouseReleaseEvent(QMouseEvent* e) {
     if (!m_adapterRaw) { QQuickFramebufferObject::mouseReleaseEvent(e); return; }
     updateModifiersFrom(int(e->modifiers()));
-    qreal dpr = window() ? window()->devicePixelRatio() : 1.0;
     m_adapterRaw->PostMouseButton(qtMouseButtonToInternal(int(e->button())), 0,
-                                  e->pos().x() * dpr, e->pos().y() * dpr);
+                                  e->pos().x(), e->pos().y());
     e->accept();
 }
 void MujocoQuickItem::mouseMoveEvent(QMouseEvent* e) {
     if (!m_adapterRaw) { QQuickFramebufferObject::mouseMoveEvent(e); return; }
     updateModifiersFrom(int(e->modifiers()));
-    qreal dpr = window() ? window()->devicePixelRatio() : 1.0;
-    m_adapterRaw->PostMouseMove(e->pos().x() * dpr, e->pos().y() * dpr);
+    m_adapterRaw->PostMouseMove(e->pos().x(), e->pos().y());
     e->accept();
 }
 void MujocoQuickItem::hoverMoveEvent(QHoverEvent* e) {
     if (!m_adapterRaw) { QQuickFramebufferObject::hoverMoveEvent(e); return; }
-    qreal dpr = window() ? window()->devicePixelRatio() : 1.0;
-    m_adapterRaw->PostMouseMove(e->pos().x() * dpr, e->pos().y() * dpr);
+    m_adapterRaw->PostMouseMove(e->pos().x(), e->pos().y());
     e->accept();
 }
 void MujocoQuickItem::wheelEvent(QWheelEvent* e) {
