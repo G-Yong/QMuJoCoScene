@@ -458,6 +458,15 @@ public:
     // QVariantList<ContactInfo> 返回接触（无碰撞时也为空列表）。
     // 同时会把接触快照投递到 GUI 线程更新 m_contactSnapshot 并发 contactsChanged。
     Q_INVOKABLE QVariantList setJointsAndDetect(const QVariantList& values);
+    // 按关节名称指定写入部分关节的 qpos 值，其余关节保持不变；然后执行
+    // mj_forward 并返回当前接触快照（与按序列写入版本相同语义）。
+    // values 的 key 为关节名称（字符串），value 为目标 qpos 值：
+    //   hinge / slide 关节：传 double（或可转为 double 的值）；
+    //   ball / free  关节：传 QVariantList，长度须与 qposDim（4/7）匹配。
+    // 无法解析的 key（关节不存在、类型不匹配、列表长度错误）会被静默跳过。
+    // 写入失败（模型未加载或 values 为空）时返回空列表；成功时以
+    // QVariantList<ContactInfo> 返回接触（无碰撞时也为空列表）。
+    Q_INVOKABLE QVariantList setJointsAndDetect(const QVariantMap& values);
 
     // ------------------------------------------------------------------
     // 驱动器控制接口

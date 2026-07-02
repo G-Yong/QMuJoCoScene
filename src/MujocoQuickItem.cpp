@@ -2414,6 +2414,57 @@ bool MujocoQuickItem::setJoints(const QVariantList& values)
     return applied;
 }
 
+QVariantList MujocoQuickItem::setJointsAndDetect(const QVariantMap& values)
+{
+    QVariantList result;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_) return;
+        if (values.isEmpty()) return;
+        bool anyWritten = false;
+        for (auto it = values.cbegin(); it != values.cend(); ++it) {
+            const int id = mj_name2id(sim.m_, mjOBJ_JOINT,
+                                      it.key().toUtf8().constData());
+            if (!isValidIndex(id, static_cast<int>(sim.m_->njnt))) continue;
+            const int type = sim.m_->jnt_type[id];
+            const int adr  = sim.m_->jnt_qposadr[id];
+            const int dim  = kJntQposDim[type];
+            if (dim == 1) {
+                // hinge / slide：接受单个数值
+                bool ok = false;
+                const double v = it.value().toDouble(&ok);
+                if (!ok) continue;
+                sim.qpos_[adr] = v;
+                sim.d_->qpos[adr] = v;
+                anyWritten = true;
+            } else {
+                // ball (dim=4) / free (dim=7)：接受 QVariantList
+                const QVariantList sub = it.value().toList();
+                if (sub.size() != dim) continue;
+                for (int k = 0; k < dim; ++k) {
+                    const double v = sub[k].toDouble();
+                    sim.qpos_[adr + k] = v;
+                    sim.d_->qpos[adr + k] = v;
+                }
+                anyWritten = true;
+            }
+        }
+        if (!anyWritten) return;
+        mj_forward(sim.m_, sim.d_);
+        QList<ContactInfo> contacts = buildContactSnapshot(sim.m_, sim.d_);
+        result.reserve(contacts.size());
+        for (const auto& c : contacts)
+            result.append(QVariant::fromValue(c));
+        QMetaObject::invokeMethod(this, [this, contacts = std::move(contacts)] {
+            if (!sameContactSnapshot(m_contactSnapshot, contacts)) {
+                m_contactSnapshot = contacts;
+                emit contactsChanged();
+            }
+        }, Qt::QueuedConnection);
+        sim.pending_.ui_update_simulation = true;
+    });
+    return result;
+}
+
 QVariantList MujocoQuickItem::setJointsAndDetect(const QVariantList& values)
 {
     QVariantList result;
