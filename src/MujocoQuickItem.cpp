@@ -3169,6 +3169,7 @@ int MujocoQuickItem::qtKeyToMjui(int key) const {
         case Qt::Key_Enter:
         case Qt::Key_Return:    return 257;
         case Qt::Key_Tab:       return 258;
+        case Qt::Key_Backtab:   return 258; // Shift+Tab → Tab + Shift modifier already set
         case Qt::Key_Backspace: return 259;
         case Qt::Key_Insert:    return 260;
         case Qt::Key_Delete:    return 261;
@@ -3197,14 +3198,18 @@ int MujocoQuickItem::qtKeyToMjui(int key) const {
 }
 void MujocoQuickItem::keyPressEvent(QKeyEvent* e) {
     if (!m_adapterRaw) { QQuickFramebufferObject::keyPressEvent(e); return; }
-    updateModifiersFrom(int(e->modifiers()));
+    int mods = int(e->modifiers());
+    if (e->key() == Qt::Key_Backtab) mods |= Qt::ShiftModifier;
+    updateModifiersFrom(mods);
     int k = qtKeyToMjui(e->key());
     if (k) m_adapterRaw->PostKey(k, 1);
     e->accept();
 }
 void MujocoQuickItem::keyReleaseEvent(QKeyEvent* e) {
     if (!m_adapterRaw) { QQuickFramebufferObject::keyReleaseEvent(e); return; }
-    updateModifiersFrom(int(e->modifiers()));
+    int mods = int(e->modifiers());
+    if (e->key() == Qt::Key_Backtab) mods |= Qt::ShiftModifier;
+    updateModifiersFrom(mods);
     int k = qtKeyToMjui(e->key());
     if (k) m_adapterRaw->PostKey(k, 0);
     e->accept();
