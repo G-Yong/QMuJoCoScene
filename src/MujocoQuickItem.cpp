@@ -2718,6 +2718,33 @@ bool MujocoQuickItem::setFreeCamera() {
     return applied;
 }
 
+bool MujocoQuickItem::orthographicCamera() {
+    bool ortho = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        const mjModel* m = sim.is_passive_ ? sim.m_passive_ : sim.m_;
+        if (m) ortho = (m->vis.global.orthographic != 0);
+    });
+    return ortho;
+}
+
+bool MujocoQuickItem::setOrthographicCamera(bool orthographic) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        mjModel* m = sim.is_passive_ ? sim.m_passive_ : sim.m_;
+        if (!m) return;
+        const int val = orthographic ? 1 : 0;
+        if (m->vis.global.orthographic == val) return;
+        m->vis.global.orthographic = val;
+        // 同步更新 cam.orthographic 以保持一致性（虽然 free/tracking 相机不读它，
+        // 但固定相机路径会用到）
+        sim.cam.orthographic = val;
+        sim.pending_.ui_update_rendering = true;
+        applied = true;
+    });
+    if (applied) emit orthographicCameraChanged();
+    return applied;
+}
+
 bool MujocoQuickItem::setTrackingCamera(int bodyId) {
     bool applied = false;
     withSimulateLocked([&](mujoco::Simulate& sim) {

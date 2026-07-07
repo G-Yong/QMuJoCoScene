@@ -74,6 +74,7 @@ class MUJOCOQUICKITEM_EXPORT MujocoQuickItem : public QQuickFramebufferObject, p
     Q_PROPERTY(bool sensorVisible READ sensorVisible WRITE setSensorVisible NOTIFY sensorVisibleChanged)
     Q_PROPERTY(bool pauseUpdateEnabled READ pauseUpdateEnabled WRITE setPauseUpdateEnabled NOTIFY pauseUpdateEnabledChanged)
     Q_PROPERTY(bool fullscreenRequested READ fullscreenRequested WRITE setFullscreenRequested NOTIFY fullscreenRequestedChanged)
+    Q_PROPERTY(bool orthographicCamera READ orthographicCamera WRITE setOrthographicCamera NOTIFY orthographicCameraChanged)
     Q_PROPERTY(bool vSyncEnabled READ vSyncEnabled WRITE setVSyncEnabled NOTIFY vSyncEnabledChanged)
     Q_PROPERTY(bool busyWaitEnabled READ busyWaitEnabled WRITE setBusyWaitEnabled NOTIFY busyWaitEnabledChanged)
     Q_PROPERTY(bool leftUiVisible READ leftUiVisible WRITE setLeftUiVisible NOTIFY leftUiVisibleChanged)
@@ -514,6 +515,11 @@ public:
 
     Q_INVOKABLE bool setFreeCamera();
     Q_INVOKABLE bool setTrackingCamera(int bodyId = -1);
+
+    // 切换正交/透视投影。orthographic=true 为正交投影，false 为透视投影。
+    // 修改立即生效，会触发渲染更新。
+    bool orthographicCamera();
+    Q_INVOKABLE bool setOrthographicCamera(bool orthographic);
     Q_INVOKABLE bool setFixedCamera(int cameraIndex);
     Q_INVOKABLE bool cycleFixedCamera(int direction = 1);
     Q_INVOKABLE bool alignView();
@@ -629,6 +635,7 @@ signals:
     void sensorVisibleChanged();
     void pauseUpdateEnabledChanged();
     void fullscreenRequestedChanged();
+    void orthographicCameraChanged();
     void vSyncEnabledChanged();
     void busyWaitEnabledChanged();
     void leftUiVisibleChanged();
