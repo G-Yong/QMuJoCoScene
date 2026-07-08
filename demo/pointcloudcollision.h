@@ -93,6 +93,7 @@ public slots:
 
 private:
     void rebuildCoalPoints();
+    void rebuildRenderCloud();
     void refreshRenderColors(const QVector<unsigned char>& hitFlags);
 
     struct Impl;

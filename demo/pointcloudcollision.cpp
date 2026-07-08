@@ -160,8 +160,10 @@ struct PointCloudCollision::Impl {
     double             radius = 0.01;   // 每点半径（coal 碰撞 + 渲染）
 
     // 每个点一个 coal Sphere 碰撞对象（位姿固定，body 动时只移动 body）。
-    std::shared_ptr<coal::Sphere>                       pointShape;
-    std::vector<std::shared_ptr<coal::CollisionObject>> pointObjects;
+    // pointObjects 连续存储对象本体（非 shared_ptr），避免每点两次堆分配；
+    // reserve 精确容量后地址稳定，可安全把裸指针交给 BVH 管理器。
+    std::shared_ptr<coal::Sphere>      pointShape;
+    std::vector<coal::CollisionObject> pointObjects;
 
     QStringList                     bodyNames;
     QHash<QString, CoalBodyEntry>   bodies;  // 已注册（含 coal 网格）的 body
@@ -212,7 +214,11 @@ void PointCloudCollision::setPoints(const QVector<QVector3D>& worldPoints)
 {
     d->points = worldPoints;
     rebuildCoalPoints();
+    rebuildRenderCloud();
+}
 
+void PointCloudCollision::rebuildRenderCloud()
+{
     if (!d->item)
         return;
 
@@ -256,27 +262,42 @@ void PointCloudCollision::setPointRadius(double radius)
 
 void PointCloudCollision::rebuildCoalPoints()
 {
+    const int n = d->points.size();
+
+    // 连续存储所有点球对象，避免逐点两次堆分配（make_shared 的对象 + 控制块）。
+    // reserve 精确容量 => 后续 emplace 不触发扩容搬迁，指针地址稳定，可安全交给
+    // BVH 管理器持有。
     d->pointObjects.clear();
-    d->pointObjects.reserve(d->points.size());
-    for (int i = 0; i < d->points.size(); ++i) {
+    d->pointObjects.reserve(n);
+
+    std::vector<coal::CollisionObject*> ptrs;
+    ptrs.reserve(n);
+
+    for (int i = 0; i < n; ++i) {
         const QVector3D& p = d->points[i];
         coal::Transform3s tf;
         tf.setTranslation(coal::Vec3s(coal::Scalar(p.x()),
                                       coal::Scalar(p.y()),
                                       coal::Scalar(p.z())));
-        auto obj = std::make_shared<coal::CollisionObject>(d->pointShape, tf);
+        // compute_local_aabb=false：点球是共享形状，本地 AABB 只需算一次；
+        // 构造函数仍会算世界 AABB，故无需再显式 computeAABB()。省下每点两次多余的
+        // AABB 计算。
+        d->pointObjects.emplace_back(d->pointShape, tf, /*compute_local_aabb=*/false);
+        coal::CollisionObject& obj = d->pointObjects.back();
         // 用 userData 存点索引，broadphase 回调中可直接取回。
-        obj->setUserData(reinterpret_cast<void*>(static_cast<intptr_t>(i)));
-        obj->computeAABB();
-        d->pointObjects.push_back(std::move(obj));
+        obj.setUserData(reinterpret_cast<void*>(static_cast<intptr_t>(i)));
+        ptrs.push_back(&obj);
     }
 
     // 重建 BVH 宽相管理器（点云静态，只建一次，之后每帧 collide 查询）。
+    // 关键优化：在“空管理器”上用批量 registerObjects 一次性自顶向下建树
+    // （dtree.init，O(n log n)），远快于逐点 registerObject 的增量插入；后者每点
+    // 都做兄弟节点搜索 + 增量重平衡，且 setup() 还会因树高失衡再 balanceTopdown()
+    // 整体重排一遍，等于建两次树。批量路径直接置 setup_，故随后的 setup() 为空操作。
     if (!d->bvhManager)
         d->bvhManager = std::make_unique<coal::DynamicAABBTreeCollisionManager>();
     d->bvhManager->clear();
-    for (auto& obj : d->pointObjects)
-        d->bvhManager->registerObject(obj.get());
+    d->bvhManager->registerObjects(ptrs);
     d->bvhManager->setup();
 }
 
@@ -323,8 +344,16 @@ void PointCloudCollision::setupForLoadedScene()
     // 这里不重置、也不自建。
     if (d->externalCloudId < 0)
         d->cloudId = -1;
+
+    // 点云是世界坐标、与 MuJoCo 场景无关：coal 点球若已在 setPoints() 中构建过，
+    // 就不必重建（这是最耗时的一步，数十万~数百万点时可省数秒）。仅当尚未构建
+    // （未调用 setPoints）时才构建一次，避免和 setPoints() 重复建树。
+    if (d->pointObjects.empty() && !d->points.isEmpty())
+        rebuildCoalPoints();
+
+    // 场景重载会丢弃渲染点云：重新上传（外部点云由调用方负责）。
     if (!d->points.isEmpty())
-        setPoints(d->points);
+        rebuildRenderCloud();
 }
 
 // ---------------------------------------------------------------------------

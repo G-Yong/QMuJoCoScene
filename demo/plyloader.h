@@ -111,9 +111,10 @@ inline bool loadPly(const QString& path, PlyCloud* out, QString* err = nullptr) 
     const int ix = findProp({"x"});
     const int iy = findProp({"y"});
     const int iz = findProp({"z"});
-    const int ir = findProp({"red", "r", "diffuse_red"});
+    const int ir = findProp({"red",   "r", "diffuse_red"});
     const int ig = findProp({"green", "g", "diffuse_green"});
-    const int ib = findProp({"blue", "b", "diffuse_blue"});
+    const int ib = findProp({"blue",  "b", "diffuse_blue"});
+    const int ia = findProp({"alpha", "a", "diffuse_alpha"});
     if (ix < 0 || iy < 0 || iz < 0) { if (err) *err = "missing x/y/z"; return false; }
     const bool hasColor = (ir >= 0 && ig >= 0 && ib >= 0);
 
@@ -148,7 +149,7 @@ inline bool loadPly(const QString& path, PlyCloud* out, QString* err = nullptr) 
                 out->colors.push_back(colorScale(ir, vals[ir]));
                 out->colors.push_back(colorScale(ig, vals[ig]));
                 out->colors.push_back(colorScale(ib, vals[ib]));
-                out->colors.push_back(1.0f);
+                out->colors.push_back(colorScale(ia, vals[ia]));
             }
             ++got;
         }
@@ -175,7 +176,7 @@ inline bool loadPly(const QString& path, PlyCloud* out, QString* err = nullptr) 
                 out->colors.push_back(colorScale(ir, readBinary(rec + off[ir], vprops[ir].type)));
                 out->colors.push_back(colorScale(ig, readBinary(rec + off[ig], vprops[ig].type)));
                 out->colors.push_back(colorScale(ib, readBinary(rec + off[ib], vprops[ib].type)));
-                out->colors.push_back(1.0f);
+                out->colors.push_back(colorScale(ia, readBinary(rec + off[ia], vprops[ia].type)));
             }
         }
         out->count = vertexCount;

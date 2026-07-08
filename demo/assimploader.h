@@ -15,16 +15,21 @@
 
 #include <QString>
 #include <QVector>
+#include <QDebug>
+
+#include <Eigen/Dense>
 
 #include <coal/mesh_loader/assimp.h>   // coal::internal::Loader + buildMesh
 #include <coal/BVH/BVH_model.h>        // coal::Vec3s, Triangle32 (via internal)
 
+#include "plyloader.h"                 // loadPly — 纯点云 fallback（无面片时）
+
 // 输出结构（与旧 PlyCloud / 旧 MeshCloud 兼容）
 struct MeshCloud {
-    QVector<float> positions;   // xyz 扁平，长度 = count * 3
-    QVector<float> colors;      // 始终为空（颜色由调用方按高度等策略生成）
+    QVector<float> positions;   //  xyz 扁平，长度 = count * 3
+    QVector<float> colors;      // rgba[0.0-1.0] 假如模型文件本身带颜色就填充颜色,没有则由调用方自己填充
     int            count   = 0;
-    bool           hasColor = false;
+    bool           hasColor = false; // 模型是否带颜色
 };
 
 // ---------------------------------------------------------------------------
@@ -45,10 +50,39 @@ inline bool loadMesh(const QString& path, MeshCloud* out, QString* err = nullptr
 {
     if (!out) return false;
 
+    // PLY 纯点云回退：coal/Assimp 的 Loader 和 buildMesh 都依赖面片，
+    // 对 element face 0 的纯点云会直接报 "No meshes remaining"。
+    // 此时用本地 plyloader 直接读取 vertex 元素位置。
+    auto tryPlyFallback = [&]() -> bool {
+        if (!path.toLower().endsWith(QStringLiteral(".ply")))
+            return false;
+        PlyCloud ply;
+        QString plyErr;
+        if (!loadPly(path, &ply, &plyErr) || ply.count <= 0) {
+            if (err) *err = plyErr.isEmpty() ? QStringLiteral("ply fallback failed: %1").arg(path) : plyErr;
+            return false;
+        }
+        out->positions.clear();
+        out->positions.reserve(ply.count * 3);
+        for (int i = 0; i < ply.count; ++i) {
+            Eigen::Vector3f p(
+                ply.positions[3 * i + 0] * scale[0],
+                ply.positions[3 * i + 1] * scale[1],
+                ply.positions[3 * i + 2] * scale[2]);
+            out->positions << p.x() << p.y() << p.z();
+        }
+        out->colors   = ply.colors;
+        out->count    = ply.count;
+        out->hasColor = ply.hasColor;
+        return true;
+    };
+
     coal::internal::Loader loader;
     try {
         loader.load(path.toStdString());
     } catch (const std::exception& e) {
+        // coal/Assimp 加载失败（如纯点云 "No meshes remaining"）→ 回退 plyloader
+        if (tryPlyFallback()) return true;
         if (err) *err = QString::fromLatin1(e.what());
         return false;
     }
@@ -63,6 +97,8 @@ inline bool loadMesh(const QString& path, MeshCloud* out, QString* err = nullptr
     coal::internal::buildMesh(scale, loader.scene, 0, tv);
 
     if (tv.vertices_.empty()) {
+        // 有 scene 但 buildMesh 没产出顶点（如空 mesh）→ 回退 plyloader
+        if (tryPlyFallback()) return true;
         if (err) *err = QStringLiteral("no vertices found in: %1").arg(path);
         return false;
     }

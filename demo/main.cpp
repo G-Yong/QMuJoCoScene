@@ -8,6 +8,7 @@
 #include <QSurfaceFormat>
 #include <QQuickWidget>
 #include <QApplication>
+#include <QElapsedTimer>
 #include <QTimer>
 #include <QLabel>
 #include <algorithm>
@@ -92,7 +93,7 @@ bool setupBunnyPointCloud(MujocoQuickItem* mujoco, const QString& modelPath,
 {
     MeshCloud ply;
     QString err;
-    if (!loadMesh(modelPath, &ply, &err)) {
+    if (!loadMesh(modelPath, &ply, &err, coal::Vec3s(scale, scale, scale))) {
         qWarning() << "[assimp] load failed:" << modelPath << err;
         return false;
     }
@@ -107,9 +108,11 @@ bool setupBunnyPointCloud(MujocoQuickItem* mujoco, const QString& modelPath,
         const float x = ply.positions[3 * i + 0];
         const float y = ply.positions[3 * i + 1];
         const float z = ply.positions[3 * i + 2];
+
         // Y-up → Z-up：绕 X 轴 +90°，(x, y, z) → (x, -z, y)
-        QVector3D p(x * scale, -z * scale, y * scale);
+        QVector3D p(x, -z, y);
         pts.append(p);
+
         vmin.setX(std::min(vmin.x(), p.x())); vmax.setX(std::max(vmax.x(), p.x()));
         vmin.setY(std::min(vmin.y(), p.y())); vmax.setY(std::max(vmax.y(), p.y()));
         vmin.setZ(std::min(vmin.z(), p.z())); vmax.setZ(std::max(vmax.z(), p.z()));
@@ -127,6 +130,7 @@ bool setupBunnyPointCloud(MujocoQuickItem* mujoco, const QString& modelPath,
     QVector<float> colors;
     positions.reserve(ply.count * 3);
     colors.reserve(ply.count * 4);
+
     const float span = (vmax.z() > vmin.z()) ? (vmax.z() - vmin.z()) : 1.0f;
     out->points.clear();
     out->colors.clear();
@@ -135,8 +139,14 @@ bool setupBunnyPointCloud(MujocoQuickItem* mujoco, const QString& modelPath,
     for (int i = 0; i < pts.size(); ++i) {
         const QVector3D p = pts[i] + shift;
         positions << p.x() << p.y() << p.z();
+
         const QVector4D c = heightColor((pts[i].z() - vmin.z()) / span);
         colors << c.x() << c.y() << c.z() << c.w();
+
+        // const QVector4D c(ply.colors[4 * i + 0], ply.colors[4 * i + 1],
+        //                   ply.colors[4 * i + 2], ply.colors[4 * i + 3]);
+        // colors << c.x() << c.y() << c.z() << c.w();
+
         out->points.append(p);
         out->colors.append(c);
     }
@@ -244,14 +254,20 @@ int main(int argc, char *argv[])
     pcc.setMujocoItem(mujoco);
 
     QObject::connect(mujoco, &MujocoQuickItem::sceneLoaded, view, [=, &pcc](const QString& /*source*/) {
+
+        QElapsedTimer timer;
+        timer.start();
+
         // 1) 加载并渲染 bunny 点云（彩色 Circle + 地面倒影）。
         BunnyCloud bunny;
         if (!setupBunnyPointCloud(mujoco,
                                   QStringLiteral("../../../model/meshes/bunny.ply"),  // 也可换成 .stl/.obj 等格式
+                                  // QStringLiteral("C:/Users/Administrator/Desktop/123/3dImage/point_cloud_20260708_172233_839.ply"),  // 也可换成 .stl/.obj 等格式
                                   3.0f, QVector3D(0.0f, 0.0f, 0.0f),
                                   0.00035f, &bunny)) {
             return;
         }
+        qDebug() << "[bunny] loaded" << bunny.points.size() << "points in" << timer.elapsed() << "ms";
 
         // 2) 碰撞参数：coal 点球半径略大于渲染点，保证 ball 不漏过点缝。
         // PointRadius设置小一点的话，可以让碰撞更精确，但渲染点会变小。这里渲染点和碰撞点的半径不一样，碰撞点略大。
@@ -261,9 +277,18 @@ int main(int argc, char *argv[])
 
         // 3) 复用彩色渲染点云做命中高亮（保留高度色），并接入碰撞。
         pcc.setRenderCloud(bunny.cloudId, bunny.colors);
+
+        timer.start();
         pcc.setPoints(bunny.points);
+        qDebug() << "[pcc] setPoints" << bunny.points.size() << "in" << timer.elapsed() << "ms";
+
+        timer.start();
         pcc.addCollisionBody("ball");
+        qDebug() << "[pcc] addCollisionBody(ball) in" << timer.elapsed() << "ms";
+
+        timer.start();
         pcc.setupForLoadedScene();
+        qDebug() << "[pcc] setupForLoadedScene in" << timer.elapsed() << "ms";
 
         // 4) 把小球放到 bunny 上方，让它落到点云上演示碰撞。
         int ballId = -1;
