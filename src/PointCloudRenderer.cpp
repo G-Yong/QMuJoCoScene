@@ -60,7 +60,8 @@ void main() {
     vColor.a *= uAlphaScale;
     vCull = 0.0;
 
-    vec3 worldPos;
+    vec3 worldPos;      // 屏幕位置 + 深度用（倒影时是地面交点 F）
+    vec3 sizeRefPos;    // 点大小的透视距离参考
     if (uReflect == 1) {
         // 经典平面反射：点 P 在地面下的镜像 P'，相机看向 P' 的视线与地面
         // z=uPlaneZ 的交点 F 就是该反射在地面上出现的位置。把带颜色的点画在
@@ -77,11 +78,15 @@ void main() {
             // 轻微抬高，避免与地面 z-fighting（深度写关闭，仅做测试）。
             worldPos.z += 1e-3;
         }
+        // 关键：倒影点的“视觉大小”必须按镜像点 P' 的真实距离算。镜面反射的
+        // 视觉距离 = 相机→地面交点 F→原点 的路径长 = 相机→P'。若错用 F 的距离，
+        // 掠射角下 F 会趋近相机 → dist→0 → 点被放大到爆炸，造成巨量 overdraw 卡顿。
+        sizeRefPos = mirrored;
     } else {
         worldPos = aPos;
+        sizeRefPos = aPos;
     }
 
-    vec4 viewPos = uMV * vec4(worldPos, 1.0);
     gl_Position  = uMVP * vec4(worldPos, 1.0);
     if (uStyle == 0) {
         gl_PointSize = uPointSize;                       // 固定像素
@@ -90,7 +95,8 @@ void main() {
         if (uOrtho == 1) {
             px = uPointSize * uViewportH * uProjYY;      // 正交: 与距离无关
         } else {
-            float dist = max(-viewPos.z, 1e-4);
+            vec4 sizeViewPos = uMV * vec4(sizeRefPos, 1.0);
+            float dist = max(-sizeViewPos.z, 1e-4);
             px = uPointSize * uViewportH * uProjYY / dist;
         }
         gl_PointSize = clamp(px, 1.0, 4096.0);
@@ -348,6 +354,13 @@ void PointCloudRenderer::drawCloudReflected(int cloudId, int style, float pointS
                                             const QVector4D& uniformColor,
                                             float planeZ, float alphaScale) {
     if (!m_program) return;
+
+    // 相机在反射平面下方或恰在平面上时，所有点的镜像都产生向上/水平的射线，
+    // 不会穿过平面，顶点着色器会对全部点设 vCull=1.0 → 片元着色器全部 discard。
+    // 对百万级点云这等于每帧白跑 vertex shader + 光栅化 + fragment shader，
+    // 造成明显的越过地面时的卡顿。直接在 CPU 侧跳过整个 draw call。
+    if (m_camPos.z() <= planeZ) return;
+
     auto it = m_clouds.find(cloudId);
     if (it == m_clouds.end() || it->second.count <= 0) return;
     const GpuCloud& c = it->second;
@@ -366,13 +379,18 @@ void PointCloudRenderer::drawCloudReflected(int cloudId, int style, float pointS
     // 解决方法：用模板缓冲令每个像素最多接受一次反射绘制。
     //
     // mjr_render 结束后模板缓冲已不再被 MuJoCo 使用，可安全清空并借用。
-    // 清空为 0 → 仅在模板=0 处绘制 → 绘制后写 1（后续点无法再覆盖同像素）。
-    // 结果：每个地面像素恰好混入一个反射点，透明度严格等于 alphaScale。
+    // 清空为 0 → 仅在模板≠1（即初始 0）处绘制 → 绘制后 REPLACE 写入 ref=1
+    // （后续点在同像素看到模板=1 被挡掉）。结果：每个地面像素恰好混入一个反射点，
+    // 透明度严格等于 alphaScale，避免多点叠加导致的发白。
+    //
+    // 注意：GL_REPLACE 写入的是 glStencilFunc 的 ref 值，故必须让“通过条件”用的
+    // ref 恰好等于要写入的值。用 GL_EQUAL+ref=0 会把 0 写回模板（等于没写），
+    // 去重失效；改用 GL_NOTEQUAL+ref=1：初始 0≠1 通过、写 1，之后 1≠1 失败被挡。
     // ---------------------------------------------------------------
     gl->glClear(GL_STENCIL_BUFFER_BIT);
     gl->glEnable(GL_STENCIL_TEST);
-    gl->glStencilFunc(GL_EQUAL, 0, 0xFF);          // 仅在模板=0 处通过
-    gl->glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE); // 通过后写 1，禁止重复绘制
+    gl->glStencilFunc(GL_NOTEQUAL, 1, 0xFF);       // 仅在模板≠1（初始 0）处通过
+    gl->glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE); // 通过后写入 ref=1，禁止重复绘制
     gl->glStencilMask(0xFF);
 
     m_program->setUniformValue(m_locReflect, 1);
