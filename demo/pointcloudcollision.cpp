@@ -273,13 +273,18 @@ void PointCloudCollision::rebuildCoalPoints()
     std::vector<coal::CollisionObject*> ptrs;
     ptrs.reserve(n);
 
+    // 关键：共享点球的本地 AABB 必须先算一次。coal 的 AABB() 默认是空盒
+    // （min=+inf, max=-inf）；若不算，下面 compute_local_aabb=false 会让每个点的
+    // 世界 AABB 都保持空盒，BVH 宽相 overlap 恒为 false，碰撞候选一个都找不到。
+    d->pointShape->computeLocalAABB();
+
     for (int i = 0; i < n; ++i) {
         const QVector3D& p = d->points[i];
         coal::Transform3s tf;
         tf.setTranslation(coal::Vec3s(coal::Scalar(p.x()),
                                       coal::Scalar(p.y()),
                                       coal::Scalar(p.z())));
-        // compute_local_aabb=false：点球是共享形状，本地 AABB 只需算一次；
+        // compute_local_aabb=false：点球是共享形状，本地 AABB 已在循环前算好，
         // 构造函数仍会算世界 AABB，故无需再显式 computeAABB()。省下每点两次多余的
         // AABB 计算。
         d->pointObjects.emplace_back(d->pointShape, tf, /*compute_local_aabb=*/false);
