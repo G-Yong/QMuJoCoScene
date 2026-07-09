@@ -101,15 +101,43 @@ private:
     bool ensureProgram();
     GpuCloud& ensureCloud(int cloudId);
 
+    // 反射遮挡：把 MuJoCo 场景深度按平面镜像散射成"倒影遮挡深度"纹理，
+    // 供 drawCloudReflected 在片元里做深度比较，实现点云倒影被物体倒影遮挡。
+    bool ensureScatterPrograms();
+    bool ensureReflectionTargets(int w, int h, int samples);
+    void buildReflectionDepth(float planeZ);
+
     QOpenGLShaderProgram* m_program = nullptr;
     std::unordered_map<int, GpuCloud> m_clouds;
-
     // 当前帧的矩阵（beginFrame 计算）。
     QMatrix4x4 m_view;
     QMatrix4x4 m_proj;
     int        m_viewportH = 0;
     float      m_projYY    = 1.0f; // proj[1][1]，世界尺寸 → 像素换算用
     QVector3D  m_camPos;           // 当前帧相机世界坐标（倒影投影用）
+
+    // --- 反射遮挡相关（beginFrame 记录 / buildReflectionDepth 使用）---
+    unsigned int m_targetFbo   = 0;    // 当前帧目标 FBO（含 MuJoCo 场景深度）
+    int          m_viewportW   = 0;
+    QMatrix4x4   m_invViewProj;        // (proj*view)^-1，用于从深度反算世界坐标
+    bool         m_clipZeroToOne = false; // 是否启用 ARB_clip_control(ZERO_TO_ONE)
+    // 每帧只按需构建一次倒影遮挡深度（记录已构建的平面高度）。
+    bool         m_reflBuiltThisFrame = false;
+    float        m_reflBuiltPlaneZ    = 0.0f;
+
+    QOpenGLShaderProgram* m_scatterProg = nullptr;  // 场景深度 → 镜像遮挡深度散射
+    QOpenGLShaderProgram* m_resolveProg = nullptr;  // MS 深度 → 单采样深度解析
+    bool m_scatterUsesMS = false;                   // scatter 着色器是否读 MS 深度
+
+    unsigned int m_dummyVao = 0;         // scatter / 全屏解析用的空 VAO
+
+    int m_reflW = 0, m_reflH = 0, m_reflSamples = 0;
+    unsigned int m_reflFbo       = 0;    // 倒影遮挡深度 FBO（仅深度）
+    unsigned int m_reflDepthTex  = 0;    // 倒影遮挡深度纹理（单采样，可采样）
+    unsigned int m_sceneDepthTex = 0;    // 解析后的场景深度（单采样，可采样）
+    unsigned int m_sceneDepthFbo = 0;    // 上者的 FBO（blit / 解析目标）
+    unsigned int m_sceneDepthMsTex = 0;  // 场景深度 MS 中转纹理（samples>1 时）
+    unsigned int m_sceneDepthMsFbo = 0;  // 上者的 FBO
 
     // uniform / attrib 位置缓存。
     int m_locMVP   = -1;
@@ -124,4 +152,7 @@ private:
     int m_locReflect         = -1;
     int m_locCamPos          = -1;
     int m_locPlaneZ          = -1;
+    int m_locUseOccluder     = -1;
+    int m_locOccluderTex     = -1;
+    int m_locClipZeroToOne   = -1;
 };

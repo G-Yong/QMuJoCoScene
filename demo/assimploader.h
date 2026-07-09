@@ -21,7 +21,9 @@
 #include <QVector>
 #include <QByteArray>
 #include <QFile>
+#include <QDataStream>
 #include <QDebug>
+#include <QRegularExpression>
 
 #include <cstring>
 #include <cstdint>
@@ -355,6 +357,245 @@ inline bool loadPcd(const QString& path, MeshCloud* out, QString* err,
     return out->count > 0;
 }
 
+// -------------------------------------------------------------------------
+// loadPlyFallback — PLY 回退解析器，处理纯点云 PLY（只有 vertex、无 face）。
+// Assimp 无法处理这种文件（"all meshes are orphaned"），因此直接读取。
+// 支持 ascii / binary_little_endian / binary_big_endian 格式。
+// -------------------------------------------------------------------------
+inline bool loadPlyFallback(const QString& path, MeshCloud* out, QString* err,
+                            const coal::Vec3s& scale)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) {
+        if (err) *err = QStringLiteral("cannot open %1").arg(path);
+        return false;
+    }
+
+    // ── 第一遍：逐字节扫描 header，定位 end_header 行尾（二进制数据起点）──
+    const QByteArray all = f.readAll();
+    f.close();
+
+    // 查找 "end_header" 标记（不区分大小写）
+    int ehPos = -1;
+    for (int i = 0; i <= all.size() - 10; ++i) {
+        if (qstrnicmp(all.constData() + i, "end_header", 10) == 0) {
+            ehPos = i;
+            break;
+        }
+    }
+    if (ehPos < 0) {
+        if (err) *err = QStringLiteral("PLY: no end_header found in %1").arg(path);
+        return false;
+    }
+
+    // 找到 end_header 后的第一个换行符，其后的字节就是数据起点
+    int dataStart = all.indexOf('\n', ehPos + 10);
+    if (dataStart < 0) {
+        if (err) *err = QStringLiteral("PLY: end_header not followed by newline in %1").arg(path);
+        return false;
+    }
+    ++dataStart; // 跳过换行符
+
+    // ── 解析 header 文本 ──
+    const QByteArray headerBytes = all.left(ehPos);
+    const QString header = QString::fromLatin1(headerBytes);
+    const QStringList lines = header.split('\n');
+
+    enum PlyFmt { PlyAscii, PlyBinLE, PlyBinBE };
+    PlyFmt format = PlyAscii;
+    bool formatSet = false;
+
+    struct PlyProp {
+        QString name;
+        int     byteSize = 4;
+        int     offset   = 0;
+        bool    isFloat  = true;   // true=float/double, false=integer/uchar
+    };
+
+    QString curElement;
+    long vertexCount = -1;
+    QVector<PlyProp> vertexProps;
+    int vertexStride = 0;
+
+    for (const QString& rawLine : lines) {
+        const QString line = rawLine.trimmed();
+        if (line.isEmpty()) continue;
+        QStringList tok = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        if (tok.isEmpty()) continue;
+
+        const QString key = tok[0].toLower();
+
+        if (key == "ply") {
+            continue;
+        } else if (key == "format") {
+            if (tok.size() >= 2) {
+                const QString fname = tok[1].toLower();
+                if (fname == "ascii")            format = PlyAscii;
+                else if (fname == "binary_little_endian") format = PlyBinLE;
+                else if (fname == "binary_big_endian")   format = PlyBinBE;
+                else {
+                    if (err) *err = QStringLiteral("PLY: unsupported format '%1' in %2")
+                                        .arg(tok[1], path);
+                    return false;
+                }
+                formatSet = true;
+            }
+        } else if (key == "comment") {
+            continue;
+        } else if (key == "element") {
+            curElement = (tok.size() >= 2) ? tok[1].toLower() : QString();
+            long count = (tok.size() >= 3) ? tok[2].toLong() : 0;
+            if (curElement == "vertex") {
+                vertexCount = count;
+                vertexProps.clear();
+                vertexStride = 0;
+            }
+        } else if (key == "property") {
+            if (tok.size() < 3) continue;
+
+            // 跳过 list 类型属性（如 property list uchar int vertex_indices）
+            if (tok[1].compare("list", Qt::CaseInsensitive) == 0) continue;
+
+            PlyProp prop;
+            prop.name = tok[2];
+
+            // 类型映射
+            const QString ptype = tok[1].toLower();
+            if (ptype == "char" || ptype == "int8")       { prop.byteSize = 1; prop.isFloat = false; }
+            else if (ptype == "uchar" || ptype == "uint8") { prop.byteSize = 1; prop.isFloat = false; }
+            else if (ptype == "short" || ptype == "int16")  { prop.byteSize = 2; prop.isFloat = false; }
+            else if (ptype == "ushort" || ptype == "uint16"){ prop.byteSize = 2; prop.isFloat = false; }
+            else if (ptype == "int" || ptype == "int32")    { prop.byteSize = 4; prop.isFloat = false; }
+            else if (ptype == "uint" || ptype == "uint32")  { prop.byteSize = 4; prop.isFloat = false; }
+            else if (ptype == "float" || ptype == "float32") { prop.byteSize = 4; prop.isFloat = true; }
+            else if (ptype == "double" || ptype == "float64"){ prop.byteSize = 8; prop.isFloat = true; }
+            else {
+                // 未知类型，跳过该 property（不参与 stride 计算）
+                continue;
+            }
+
+            prop.offset = vertexStride;
+            vertexStride += prop.byteSize;
+
+            if (curElement == "vertex")
+                vertexProps.append(prop);
+        }
+    }
+
+    if (!formatSet) {
+        if (err) *err = QStringLiteral("PLY: no format line in %1").arg(path);
+        return false;
+    }
+    if (vertexCount <= 0 || vertexProps.isEmpty()) {
+        if (err) *err = QStringLiteral("PLY: no vertices in %1").arg(path);
+        return false;
+    }
+
+    // ── 定位 x/y/z 和颜色属性 ──
+    int ix = -1, iy = -1, iz = -1;
+    int ir = -1, ig = -1, ib = -1, ia = -1;
+    for (int i = 0; i < vertexProps.size(); ++i) {
+        const QString n = vertexProps[i].name.toLower();
+        if      (n == "x") ix = i;
+        else if (n == "y") iy = i;
+        else if (n == "z") iz = i;
+        else if (n == "red"   || n == "r") ir = i;
+        else if (n == "green" || n == "g") ig = i;
+        else if (n == "blue"  || n == "b") ib = i;
+        else if (n == "alpha" || n == "a") ia = i;
+    }
+    if (ix < 0 || iy < 0 || iz < 0) {
+        if (err) *err = QStringLiteral("PLY: missing x/y/z properties in %1").arg(path);
+        return false;
+    }
+    const bool hasColor = (ir >= 0 && ig >= 0 && ib >= 0);
+
+    // ── 读取数据 ──
+    out->positions.clear();
+    out->colors.clear();
+    out->positions.reserve(static_cast<int>(vertexCount) * 3);
+    if (hasColor) out->colors.reserve(static_cast<int>(vertexCount) * 4);
+
+    if (format == PlyAscii) {
+        // ASCII 逐行读取
+        const QByteArray body = all.mid(dataStart);
+        const QList<QByteArray> dataLines = body.split('\n');
+        long got = 0;
+        for (const QByteArray& dl : dataLines) {
+            if (got >= vertexCount) break;
+            const QByteArray t = dl.trimmed();
+            if (t.isEmpty()) continue;
+            const QList<QByteArray> parts = t.split(' ');
+            QVector<double> vals;
+            vals.reserve(parts.size());
+            for (const QByteArray& s : parts)
+                if (!s.isEmpty()) vals.push_back(s.toDouble());
+            if (vals.size() < vertexProps.size()) continue;
+
+            out->positions << static_cast<float>(vals[ix] * scale[0])
+                           << static_cast<float>(vals[iy] * scale[1])
+                           << static_cast<float>(vals[iz] * scale[2]);
+            if (hasColor) {
+                float r = static_cast<float>(vals[ir] / (vertexProps[ir].isFloat ? 1.0 : 255.0));
+                float g = static_cast<float>(vals[ig] / (vertexProps[ig].isFloat ? 1.0 : 255.0));
+                float b = static_cast<float>(vals[ib] / (vertexProps[ib].isFloat ? 1.0 : 255.0));
+                float a = (ia >= 0) ? static_cast<float>(vals[ia] / (vertexProps[ia].isFloat ? 1.0 : 255.0)) : 1.0f;
+                out->colors << r << g << b << a;
+            }
+            ++got;
+        }
+        out->count = static_cast<int>(got);
+    } else {
+        // Binary: 直接用 QDataStream 按 stride 逐条读取
+        QDataStream ds(all.mid(dataStart));
+        ds.setByteOrder(format == PlyBinLE ? QDataStream::LittleEndian : QDataStream::BigEndian);
+        ds.setFloatingPointPrecision(QDataStream::SinglePrecision);
+
+        // 构建读取 buffer
+        QByteArray rowBuf(vertexStride, '\0');
+
+        for (long i = 0; i < vertexCount; ++i) {
+            if (ds.atEnd()) break;
+            int rd = ds.readRawData(rowBuf.data(), vertexStride);
+            if (rd < vertexStride) break;
+
+            auto readVal = [&](int propIdx) -> double {
+                const PlyProp& p = vertexProps[propIdx];
+                const char* ptr = rowBuf.constData() + p.offset;
+                if (p.byteSize == 1) {
+                    if (p.isFloat) return 0.0; // char 不可能是 float
+                    return static_cast<double>(static_cast<unsigned char>(*ptr));
+                } else if (p.byteSize == 4) {
+                    if (p.isFloat) {
+                        float v; std::memcpy(&v, ptr, 4); return v;
+                    } else {
+                        std::int32_t v; std::memcpy(&v, ptr, 4); return v;
+                    }
+                } else if (p.byteSize == 8) {
+                    double v; std::memcpy(&v, ptr, 8); return v;
+                } else { // byteSize == 2
+                    std::uint16_t v; std::memcpy(&v, ptr, 2); return v;
+                }
+            };
+
+            out->positions << static_cast<float>(readVal(ix) * scale[0])
+                           << static_cast<float>(readVal(iy) * scale[1])
+                           << static_cast<float>(readVal(iz) * scale[2]);
+            if (hasColor) {
+                const float r = static_cast<float>(readVal(ir) / (vertexProps[ir].isFloat ? 1.0 : 255.0));
+                const float g = static_cast<float>(readVal(ig) / (vertexProps[ig].isFloat ? 1.0 : 255.0));
+                const float b = static_cast<float>(readVal(ib) / (vertexProps[ib].isFloat ? 1.0 : 255.0));
+                const float a = (ia >= 0) ? static_cast<float>(readVal(ia) / (vertexProps[ia].isFloat ? 1.0 : 255.0)) : 1.0f;
+                out->colors << r << g << b << a;
+            }
+        }
+        out->count = static_cast<int>(out->positions.size() / 3);
+    }
+
+    out->hasColor = hasColor && !out->colors.isEmpty();
+    return out->count > 0;
+}
+
 } // namespace assimploader_detail
 
 // ---------------------------------------------------------------------------
@@ -387,6 +628,11 @@ inline bool loadMesh(const QString& path, MeshCloud* out, QString* err = nullptr
     const aiScene* scene = importer.ReadFile(path.toStdString(),
                                              aiProcess_PreTransformVertices);
     if (!scene || scene->mNumMeshes == 0) {
+        // Assimp 无法处理纯点云 PLY（只有 vertex、无 face，mesh 会变成 orphaned）。
+        // 对这种文件，回退到内置 PLY 解析器直接逐行读取顶点。
+        if (path.toLower().endsWith(QStringLiteral(".ply"))) {
+            return assimploader_detail::loadPlyFallback(path, out, err, scale);
+        }
         const char* aiErr = importer.GetErrorString();
         if (err) *err = (aiErr && aiErr[0]) ? QString::fromLatin1(aiErr)
                                             : QStringLiteral("assimp failed to load: %1").arg(path);

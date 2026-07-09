@@ -29,11 +29,60 @@
 #ifndef GL_POINT_SPRITE
 #  define GL_POINT_SPRITE 0x8861
 #endif
+#ifndef GL_SAMPLES
+#  define GL_SAMPLES 0x80A9
+#endif
+#ifndef GL_TEXTURE_2D_MULTISAMPLE
+#  define GL_TEXTURE_2D_MULTISAMPLE 0x9100
+#endif
+#ifndef GL_DEPTH24_STENCIL8
+#  define GL_DEPTH24_STENCIL8 0x88F0
+#endif
+#ifndef GL_DEPTH_STENCIL
+#  define GL_DEPTH_STENCIL 0x84F9
+#endif
+#ifndef GL_UNSIGNED_INT_24_8
+#  define GL_UNSIGNED_INT_24_8 0x84FA
+#endif
+#ifndef GL_DEPTH_STENCIL_ATTACHMENT
+#  define GL_DEPTH_STENCIL_ATTACHMENT 0x821A
+#endif
+#ifndef GL_DEPTH_COMPONENT24
+#  define GL_DEPTH_COMPONENT24 0x81A6
+#endif
+#ifndef GL_DEPTH_ATTACHMENT
+#  define GL_DEPTH_ATTACHMENT 0x8D00
+#endif
+#ifndef GL_DEPTH_COMPONENT
+#  define GL_DEPTH_COMPONENT 0x1902
+#endif
+#ifndef GL_TEXTURE_COMPARE_MODE
+#  define GL_TEXTURE_COMPARE_MODE 0x884C
+#endif
+#ifndef GL_DEPTH_BUFFER_BIT
+#  define GL_DEPTH_BUFFER_BIT 0x00000100
+#endif
+#ifndef GL_STENCIL_BUFFER_BIT
+#  define GL_STENCIL_BUFFER_BIT 0x00000400
+#endif
+#ifndef GL_RENDERBUFFER
+#  define GL_RENDERBUFFER 0x8D41
+#endif
+#ifndef GL_DEPTH32F_STENCIL8
+#  define GL_DEPTH32F_STENCIL8 0x8CAD
+#endif
+#ifndef GL_FLOAT_32_UNSIGNED_INT_24_8_REV
+#  define GL_FLOAT_32_UNSIGNED_INT_24_8_REV 0x8DAD
+#endif
 
 namespace {
 
 // glClipControl 不在 QOpenGLExtraFunctions 中（非 GLES），需自行解析。
 using PfnGlClipControl = void (QOPENGLF_APIENTRYP)(GLenum origin, GLenum depth);
+// glTexImage2DMultisample 同样不在 QOpenGLExtraFunctions 中。
+using PfnGlTexImage2DMultisample =
+    void (QOPENGLF_APIENTRYP)(GLenum target, GLsizei samples, GLenum internalformat,
+                              GLsizei width, GLsizei height, GLboolean fixedsamplelocations);
 
 const char* kVertexShader = R"GLSL(
 #version 330
@@ -53,12 +102,15 @@ uniform vec4  uUniformColor;
 uniform int   uReflect;        // 1 = 渲染地面倒影
 uniform vec3  uCamPos;         // 相机世界坐标（倒影投影用）
 uniform float uPlaneZ;         // 反射平面高度 z
+uniform bool  uClipZeroToOne;  // 深度约定：true=ZERO_TO_ONE，false=[-1,1]
 out vec4 vColor;
 out float vCull;               // >0 表示该点应被裁剪（倒影无效）
+out float vMirrorDepth;        // 镜像点 P' 的窗口深度 [0,1]（倒影遮挡比较用）
 void main() {
     vColor = uUseUniformColor ? uUniformColor : aColor;
     vColor.a *= uAlphaScale;
     vCull = 0.0;
+    vMirrorDepth = 0.0;
 
     vec3 worldPos;      // 屏幕位置 + 深度用（倒影时是地面交点 F）
     vec3 sizeRefPos;    // 点大小的透视距离参考
@@ -78,6 +130,11 @@ void main() {
             // 轻微抬高，避免与地面 z-fighting（深度写关闭，仅做测试）。
             worldPos.z += 1e-3;
         }
+        // 镜像点 P' 的窗口深度：F 与 P' 与相机共线 → 屏幕位置相同、深度不同。
+        // 这个深度用于与"倒影遮挡深度纹理"比较，判断是否被物体倒影挡住。
+        vec4 clipM = uMVP * vec4(mirrored, 1.0);
+        float ndcZ = clipM.z / max(abs(clipM.w), 1e-8);
+        vMirrorDepth = uClipZeroToOne ? ndcZ : (ndcZ * 0.5 + 0.5);
         // 关键：倒影点的“视觉大小”必须按镜像点 P' 的真实距离算。镜面反射的
         // 视觉距离 = 相机→地面交点 F→原点 的路径长 = 相机→P'。若错用 F 的距离，
         // 掠射角下 F 会趋近相机 → dist→0 → 点被放大到爆炸，造成巨量 overdraw 卡顿。
@@ -107,11 +164,21 @@ void main() {
 const char* kFragmentShader = R"GLSL(
 #version 330
 uniform int uStyle;
+uniform int uReflect;              // 1 = 正在画倒影
+uniform int uUseOccluder;          // 1 = 启用"物体倒影"遮挡比较
+uniform sampler2D uOccluderDepth;  // 倒影遮挡深度纹理（reverse-Z 窗口深度）
 in vec4 vColor;
 in float vCull;
+in float vMirrorDepth;
 out vec4 fragColor;
 void main() {
     if (vCull > 0.5) discard;                            // 无效倒影点
+    // 倒影遮挡：若该像素处"物体倒影"的镜像深度比本点的镜像深度更近
+    // （reverse-Z 下更大 = 更近），说明本点的倒影被物体倒影挡住 → 丢弃。
+    if (uReflect == 1 && uUseOccluder == 1) {
+        float occ = texelFetch(uOccluderDepth, ivec2(gl_FragCoord.xy), 0).r;
+        if (occ > vMirrorDepth + 1e-5) discard;
+    }
     if (uStyle == 0 || uStyle == 1) {
         fragColor = vColor;                              // pixel / square: 整片
     } else {
@@ -128,6 +195,91 @@ void main() {
             fragColor = vColor;
         }
     }
+}
+)GLSL";
+
+// -------------------------------------------------------------------------
+// 散射着色器：把 MuJoCo 场景深度缓冲里的每个像素反算成世界点 Q，
+// 若 Q 在反射平面之上，则镜像成 Q' 并按主相机投影，写入"倒影遮挡深度"。
+// 用 W*H 个点（gl_VertexID → 像素）驱动，无需顶点缓冲。
+// SAMPLES_MS 宏为 1 时读多重采样深度纹理（取 sample 0），否则读单采样。
+// -------------------------------------------------------------------------
+const char* kScatterVertexShaderSS = R"GLSL(
+#version 330
+uniform sampler2D uSceneDepth;
+uniform mat4  uInvViewProj;
+uniform mat4  uMVP;
+uniform int   uViewportW;
+uniform int   uViewportH;
+uniform float uPlaneZ;
+uniform float uPlaneBias;
+uniform bool  uClipZeroToOne;
+void main() {
+    int px = gl_VertexID % uViewportW;
+    int py = gl_VertexID / uViewportW;
+    float d = texelFetch(uSceneDepth, ivec2(px, py), 0).r;   // 窗口深度 [0,1]
+    if (d <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; return; } // 远平面/背景
+    vec2 uv = (vec2(float(px), float(py)) + 0.5) / vec2(float(uViewportW), float(uViewportH));
+    vec3 ndc;
+    ndc.xy = uv * 2.0 - 1.0;
+    ndc.z  = uClipZeroToOne ? d : (d * 2.0 - 1.0);
+    vec4 w = uInvViewProj * vec4(ndc, 1.0);
+    vec3 Q = w.xyz / w.w;
+    if (Q.z <= uPlaneZ + uPlaneBias) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; return; } // 平面/地面自身及下方
+    vec3 Qm = vec3(Q.xy, 2.0 * uPlaneZ - Q.z);               // 镜像到平面下
+    gl_Position  = uMVP * vec4(Qm, 1.0);
+    gl_PointSize = 2.0;                                       // 略放大填补散射空洞
+}
+)GLSL";
+
+const char* kScatterVertexShaderMS = R"GLSL(
+#version 330
+uniform sampler2DMS uSceneDepthMS;
+uniform mat4  uInvViewProj;
+uniform mat4  uMVP;
+uniform int   uViewportW;
+uniform int   uViewportH;
+uniform float uPlaneZ;
+uniform bool  uClipZeroToOne;
+void main() {
+    int px = gl_VertexID % uViewportW;
+    int py = gl_VertexID / uViewportW;
+    float d = texelFetch(uSceneDepthMS, ivec2(px, py), 0).r;
+    if (d <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; return; }
+    vec2 uv = (vec2(float(px), float(py)) + 0.5) / vec2(float(uViewportW), float(uViewportH));
+    vec3 ndc;
+    ndc.xy = uv * 2.0 - 1.0;
+    ndc.z  = uClipZeroToOne ? d : (d * 2.0 - 1.0);
+    vec4 w = uInvViewProj * vec4(ndc, 1.0);
+    vec3 Q = w.xyz / w.w;
+    if (Q.z <= uPlaneZ) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; return; }
+    vec3 Qm = vec3(Q.xy, 2.0 * uPlaneZ - Q.z);
+    gl_Position  = uMVP * vec4(Qm, 1.0);
+    gl_PointSize = 2.0;
+}
+)GLSL";
+
+// 散射着色器只写深度，片元颜色无关紧要。
+const char* kScatterFragmentShader = R"GLSL(
+#version 330
+out vec4 c;
+void main() { c = vec4(1.0); }
+)GLSL";
+
+// MS 深度 → 单采样深度解析：全屏三角形，取 sample 0 的深度写入 gl_FragDepth。
+const char* kResolveVertexShader = R"GLSL(
+#version 330
+void main() {
+    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+)GLSL";
+
+const char* kResolveFragmentShader = R"GLSL(
+#version 330
+uniform sampler2DMS uSceneDepthMS;
+void main() {
+    gl_FragDepth = texelFetch(uSceneDepthMS, ivec2(gl_FragCoord.xy), 0).r;
 }
 )GLSL";
 
@@ -161,6 +313,9 @@ bool PointCloudRenderer::ensureProgram() {
     m_locReflect         = prog->uniformLocation("uReflect");
     m_locCamPos          = prog->uniformLocation("uCamPos");
     m_locPlaneZ          = prog->uniformLocation("uPlaneZ");
+    m_locUseOccluder     = prog->uniformLocation("uUseOccluder");
+    m_locOccluderTex     = prog->uniformLocation("uOccluderDepth");
+    m_locClipZeroToOne   = prog->uniformLocation("uClipZeroToOne");
     return true;
 }
 
@@ -254,6 +409,9 @@ void PointCloudRenderer::beginFrame(unsigned int targetFbo, int viewportW, int v
     auto* gl = ctx->extraFunctions();
 
     m_viewportH = viewportH;
+    m_viewportW = viewportW;
+    m_targetFbo = targetFbo;
+    m_reflBuiltThisFrame = false;
     m_camPos = QVector3D(camPos[0], camPos[1], camPos[2]);
 
     // --- 复制 MuJoCo render_gl3.c setView() 的投影/视图/深度约定 ---------
@@ -296,10 +454,15 @@ void PointCloudRenderer::beginFrame(unsigned int targetFbo, int viewportW, int v
         clipControlFn(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
         zflip.translate(0.0f, 0.0f, 0.5f);
         zflip.scale(1.0f, 1.0f, -0.5f);
+        m_clipZeroToOne = true;
     } else {
         zflip.scale(1.0f, 1.0f, -1.0f);
+        m_clipZeroToOne = false;
     }
     m_proj = zflip * frustum;
+
+    // 从深度反算世界坐标用的逆矩阵（散射倒影遮挡深度用）。
+    m_invViewProj = (m_proj * m_view).inverted();
 
     // 世界尺寸 → 像素换算系数。
     m_projYY = orthographic
@@ -330,6 +493,209 @@ void PointCloudRenderer::beginFrame(unsigned int targetFbo, int viewportW, int v
     m_program->setUniformValue(m_locAlphaScale, 1.0f);
     m_program->setUniformValue(m_locReflect, 0);
     m_program->setUniformValue(m_locCamPos, m_camPos);
+    if (m_locUseOccluder >= 0)   m_program->setUniformValue(m_locUseOccluder, 0);
+    if (m_locClipZeroToOne >= 0) m_program->setUniformValue(m_locClipZeroToOne, m_clipZeroToOne);
+    if (m_locOccluderTex >= 0)   m_program->setUniformValue(m_locOccluderTex, 0); // 纹理单元 0
+}
+
+bool PointCloudRenderer::ensureScatterPrograms() {
+    if (!m_resolveProg) {
+        auto* prog = new QOpenGLShaderProgram();
+        if (prog->addShaderFromSourceCode(QOpenGLShader::Vertex, kResolveVertexShader) &&
+            prog->addShaderFromSourceCode(QOpenGLShader::Fragment, kResolveFragmentShader) &&
+            prog->link()) {
+            m_resolveProg = prog;
+        } else {
+            delete prog;
+        }
+    }
+    if (!m_scatterProg) {
+        auto* prog = new QOpenGLShaderProgram();
+        if (prog->addShaderFromSourceCode(QOpenGLShader::Vertex, kScatterVertexShaderSS) &&
+            prog->addShaderFromSourceCode(QOpenGLShader::Fragment, kScatterFragmentShader) &&
+            prog->link()) {
+            m_scatterProg = prog;
+        } else {
+            delete prog;
+            return false;
+        }
+    }
+    return m_scatterProg != nullptr;
+}
+
+bool PointCloudRenderer::ensureReflectionTargets(int w, int h, int samples) {
+    if (w <= 0 || h <= 0) return false;
+    if (m_reflW == w && m_reflH == h && m_reflSamples == samples &&
+        m_reflFbo && m_reflDepthTex && m_sceneDepthFbo && m_sceneDepthTex &&
+        (samples <= 1 || (m_sceneDepthMsFbo && m_sceneDepthMsTex))) {
+        return true;
+    }
+
+    QOpenGLContext* ctx = QOpenGLContext::currentContext();
+    if (!ctx) return false;
+    auto* gl = ctx->extraFunctions();
+    auto* f  = ctx->functions();
+
+    // 释放旧资源（尺寸/采样数变化时重建）。
+    if (m_reflFbo)         { gl->glDeleteFramebuffers(1, &m_reflFbo); m_reflFbo = 0; }
+    if (m_sceneDepthFbo)   { gl->glDeleteFramebuffers(1, &m_sceneDepthFbo); m_sceneDepthFbo = 0; }
+    if (m_sceneDepthMsFbo) { gl->glDeleteFramebuffers(1, &m_sceneDepthMsFbo); m_sceneDepthMsFbo = 0; }
+    if (m_reflDepthTex)    { f->glDeleteTextures(1, &m_reflDepthTex); m_reflDepthTex = 0; }
+    if (m_sceneDepthTex)   { f->glDeleteTextures(1, &m_sceneDepthTex); m_sceneDepthTex = 0; }
+    if (m_sceneDepthMsTex) { f->glDeleteTextures(1, &m_sceneDepthMsTex); m_sceneDepthMsTex = 0; }
+
+    // 倒影遮挡深度纹理（单采样，仅深度，可采样）。
+    f->glGenTextures(1, &m_reflDepthTex);
+    f->glBindTexture(GL_TEXTURE_2D, m_reflDepthTex);
+    f->glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, w, h, 0,
+                    GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
+    f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+    f->glBindTexture(GL_TEXTURE_2D, 0);
+
+    gl->glGenFramebuffers(1, &m_reflFbo);
+    gl->glBindFramebuffer(GL_FRAMEBUFFER, m_reflFbo);
+    gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                               GL_TEXTURE_2D, m_reflDepthTex, 0);
+
+    // 解析后的场景深度纹理（单采样，DEPTH32F_STENCIL8 以便与 MuJoCo 深度格式匹配做 blit）。
+    f->glGenTextures(1, &m_sceneDepthTex);
+    f->glBindTexture(GL_TEXTURE_2D, m_sceneDepthTex);
+    f->glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH32F_STENCIL8, w, h, 0,
+                    GL_DEPTH_STENCIL, GL_FLOAT_32_UNSIGNED_INT_24_8_REV, nullptr);
+    f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+    f->glBindTexture(GL_TEXTURE_2D, 0);
+
+    gl->glGenFramebuffers(1, &m_sceneDepthFbo);
+    gl->glBindFramebuffer(GL_FRAMEBUFFER, m_sceneDepthFbo);
+    gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                               GL_TEXTURE_2D, m_sceneDepthTex, 0);
+
+    if (samples > 1) {
+        auto texMS = reinterpret_cast<PfnGlTexImage2DMultisample>(
+            ctx->getProcAddress(QByteArrayLiteral("glTexImage2DMultisample")));
+        if (texMS) {
+            f->glGenTextures(1, &m_sceneDepthMsTex);
+            f->glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, m_sceneDepthMsTex);
+            texMS(GL_TEXTURE_2D_MULTISAMPLE, samples, GL_DEPTH32F_STENCIL8, w, h, GL_TRUE);
+            f->glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0);
+
+            gl->glGenFramebuffers(1, &m_sceneDepthMsFbo);
+            gl->glBindFramebuffer(GL_FRAMEBUFFER, m_sceneDepthMsFbo);
+            gl->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                                       GL_TEXTURE_2D_MULTISAMPLE, m_sceneDepthMsTex, 0);
+        }
+    }
+
+    if (!m_dummyVao) gl->glGenVertexArrays(1, &m_dummyVao);
+
+    gl->glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    m_reflW = w;
+    m_reflH = h;
+    m_reflSamples = samples;
+    return true;
+}
+
+void PointCloudRenderer::buildReflectionDepth(float planeZ) {
+    if (m_reflBuiltThisFrame && m_reflBuiltPlaneZ == planeZ) return;
+    if (m_viewportW <= 0 || m_viewportH <= 0) return;
+
+    QOpenGLContext* ctx = QOpenGLContext::currentContext();
+    if (!ctx) return;
+    auto* gl = ctx->extraFunctions();
+    auto* f  = ctx->functions();
+
+    // 目标 FBO 的采样数（MuJoCo offFBO 通常是多重采样）。
+    gl->glBindFramebuffer(GL_FRAMEBUFFER, m_targetFbo);
+    GLint samples = 0;
+    gl->glGetIntegerv(GL_SAMPLES, &samples);
+    if (samples < 1) samples = 1;
+
+    if (!ensureScatterPrograms()) return;
+    if (!ensureReflectionTargets(m_viewportW, m_viewportH, samples)) return;
+    const bool useMS = (samples > 1) && m_sceneDepthMsFbo && m_sceneDepthMsTex;
+    // 多重采样但无法创建 MS 中转纹理（glTexImage2DMultisample 不可用）时，
+    // MS→单采样 的深度 blit 是非法的；此时放弃遮挡构建，倒影退回无遮挡绘制。
+    if (samples > 1 && !useMS) return;
+
+    const int W = m_viewportW, H = m_viewportH;
+    const GLenum noneBuf = GL_NONE;
+
+    // --- 1) 取场景深度到单采样可采样纹理 m_sceneDepthTex ---
+    if (useMS) {
+        // MuJoCo 深度(MS) → 我们的 MS 深度纹理（同采样数，格式匹配）。
+        gl->glBindFramebuffer(GL_READ_FRAMEBUFFER, m_targetFbo);
+        gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_sceneDepthMsFbo);
+        gl->glBlitFramebuffer(0, 0, W, H, 0, 0, W, H,
+                              GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+        // MS → 单采样（全屏三角形，取 sample 0）。
+        gl->glBindFramebuffer(GL_FRAMEBUFFER, m_sceneDepthFbo);
+        gl->glViewport(0, 0, W, H);
+        gl->glDrawBuffers(1, &noneBuf);
+        gl->glDisable(GL_BLEND);
+        gl->glDisable(GL_STENCIL_TEST);
+        gl->glEnable(GL_DEPTH_TEST);
+        gl->glDepthMask(GL_TRUE);
+        gl->glDepthFunc(GL_ALWAYS);
+        m_resolveProg->bind();
+        f->glActiveTexture(GL_TEXTURE0);
+        f->glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, m_sceneDepthMsTex);
+        m_resolveProg->setUniformValue("uSceneDepthMS", 0);
+        gl->glBindVertexArray(m_dummyVao);
+        gl->glDrawArrays(GL_TRIANGLES, 0, 3);
+        gl->glBindVertexArray(0);
+        m_resolveProg->release();
+        f->glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0);
+    } else {
+        // 单采样：直接 blit 深度。
+        gl->glBindFramebuffer(GL_READ_FRAMEBUFFER, m_targetFbo);
+        gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_sceneDepthFbo);
+        gl->glBlitFramebuffer(0, 0, W, H, 0, 0, W, H, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+    }
+
+    // --- 2) 散射：场景深度 → 镜像遮挡深度 m_reflDepthTex ---
+    gl->glBindFramebuffer(GL_FRAMEBUFFER, m_reflFbo);
+    gl->glViewport(0, 0, W, H);
+    gl->glDrawBuffers(1, &noneBuf);
+    gl->glDisable(GL_BLEND);
+    gl->glDisable(GL_STENCIL_TEST);
+    gl->glDisable(GL_CULL_FACE);
+    gl->glEnable(GL_DEPTH_TEST);
+    gl->glDepthMask(GL_TRUE);
+    gl->glDepthFunc(GL_GEQUAL);          // reverse-Z：保留更近的镜像深度
+    gl->glClearDepthf(0.0f);             // reverse-Z 远平面 = 0
+    gl->glClear(GL_DEPTH_BUFFER_BIT);
+    gl->glEnable(GL_PROGRAM_POINT_SIZE);
+
+    m_scatterProg->bind();
+    f->glActiveTexture(GL_TEXTURE0);
+    f->glBindTexture(GL_TEXTURE_2D, m_sceneDepthTex);
+    m_scatterProg->setUniformValue("uSceneDepth", 0);
+    m_scatterProg->setUniformValue("uInvViewProj", m_invViewProj);
+    m_scatterProg->setUniformValue("uMVP", m_proj * m_view);
+    m_scatterProg->setUniformValue("uViewportW", W);
+    m_scatterProg->setUniformValue("uViewportH", H);
+    m_scatterProg->setUniformValue("uPlaneZ", planeZ);
+    m_scatterProg->setUniformValue("uPlaneBias", 0.03f);
+    m_scatterProg->setUniformValue("uClipZeroToOne", m_clipZeroToOne);
+    gl->glBindVertexArray(m_dummyVao);
+    gl->glDrawArrays(GL_POINTS, 0, W * H);
+    gl->glBindVertexArray(0);
+    m_scatterProg->release();
+    f->glBindTexture(GL_TEXTURE_2D, 0);
+
+    // --- 3) 恢复到主目标 FBO 与点云绘制所需状态 ---
+    gl->glBindFramebuffer(GL_FRAMEBUFFER, m_targetFbo);
+    gl->glViewport(0, 0, W, H);
+    gl->glEnable(GL_BLEND);
+    gl->glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    m_program->bind();
+
+    m_reflBuiltThisFrame = true;
+    m_reflBuiltPlaneZ = planeZ;
 }
 
 void PointCloudRenderer::drawCloud(int cloudId, int style, float pointSize,
@@ -364,6 +730,12 @@ void PointCloudRenderer::drawCloudReflected(int cloudId, int style, float pointS
     auto it = m_clouds.find(cloudId);
     if (it == m_clouds.end() || it->second.count <= 0) return;
     const GpuCloud& c = it->second;
+
+    // 先构建"倒影遮挡深度"：把 MuJoCo 场景深度按平面镜像散射成一张深度纹理，
+    // 片元着色器据此判断本点倒影是否被物体倒影挡住。构建内部会切换 FBO/程序，
+    // 返回时已重新绑定 m_program 与主目标 FBO。
+    buildReflectionDepth(planeZ);
+    const bool occluderReady = m_reflBuiltThisFrame && (m_reflDepthTex != 0);
 
     auto* gl = QOpenGLContext::currentContext()->extraFunctions();
 
@@ -402,6 +774,16 @@ void PointCloudRenderer::drawCloudReflected(int cloudId, int style, float pointS
     m_program->setUniformValue(m_locUseUniformColor, !c.hasColors);
     m_program->setUniformValue(m_locUniformColor, uniformColor);
 
+    // 绑定倒影遮挡深度纹理到纹理单元 0，片元着色器据此做遮挡剔除。
+    if (occluderReady && m_locUseOccluder >= 0) {
+        gl->glActiveTexture(GL_TEXTURE0);
+        gl->glBindTexture(GL_TEXTURE_2D, m_reflDepthTex);
+        m_program->setUniformValue(m_locOccluderTex, 0);
+        m_program->setUniformValue(m_locUseOccluder, 1);
+    } else if (m_locUseOccluder >= 0) {
+        m_program->setUniformValue(m_locUseOccluder, 0);
+    }
+
     gl->glBindVertexArray(c.vao);
     gl->glDrawArrays(GL_POINTS, 0, c.count);
     gl->glBindVertexArray(0);
@@ -409,6 +791,11 @@ void PointCloudRenderer::drawCloudReflected(int cloudId, int style, float pointS
     // 还原：关闭倒影模式与模板测试、恢复深度写入与不淡化，供后续实点云正常绘制。
     m_program->setUniformValue(m_locReflect, 0);
     m_program->setUniformValue(m_locAlphaScale, 1.0f);
+    if (m_locUseOccluder >= 0) m_program->setUniformValue(m_locUseOccluder, 0);
+    if (occluderReady) {
+        gl->glActiveTexture(GL_TEXTURE0);
+        gl->glBindTexture(GL_TEXTURE_2D, 0);
+    }
     gl->glDisable(GL_STENCIL_TEST);
     gl->glDepthMask(GL_TRUE);
 }
@@ -425,13 +812,27 @@ void PointCloudRenderer::endFrame() {
 void PointCloudRenderer::releaseGL() {
     if (QOpenGLContext::currentContext()) {
         auto* gl = QOpenGLContext::currentContext()->extraFunctions();
+        auto* f  = QOpenGLContext::currentContext()->functions();
         for (auto& kv : m_clouds) {
             gl->glDeleteVertexArrays(1, &kv.second.vao);
             gl->glDeleteBuffers(1, &kv.second.posVbo);
             gl->glDeleteBuffers(1, &kv.second.colVbo);
         }
+        // 倒影遮挡相关资源。
+        if (m_reflFbo)         { gl->glDeleteFramebuffers(1, &m_reflFbo); m_reflFbo = 0; }
+        if (m_sceneDepthFbo)   { gl->glDeleteFramebuffers(1, &m_sceneDepthFbo); m_sceneDepthFbo = 0; }
+        if (m_sceneDepthMsFbo) { gl->glDeleteFramebuffers(1, &m_sceneDepthMsFbo); m_sceneDepthMsFbo = 0; }
+        if (m_reflDepthTex)    { f->glDeleteTextures(1, &m_reflDepthTex); m_reflDepthTex = 0; }
+        if (m_sceneDepthTex)   { f->glDeleteTextures(1, &m_sceneDepthTex); m_sceneDepthTex = 0; }
+        if (m_sceneDepthMsTex) { f->glDeleteTextures(1, &m_sceneDepthMsTex); m_sceneDepthMsTex = 0; }
+        if (m_dummyVao)        { gl->glDeleteVertexArrays(1, &m_dummyVao); m_dummyVao = 0; }
     }
     m_clouds.clear();
+    m_reflW = m_reflH = m_reflSamples = 0;
     delete m_program;
     m_program = nullptr;
+    delete m_scatterProg;
+    m_scatterProg = nullptr;
+    delete m_resolveProg;
+    m_resolveProg = nullptr;
 }
