@@ -21,7 +21,6 @@
 #include <QVector>
 #include <QByteArray>
 #include <QFile>
-#include <QDataStream>
 #include <QDebug>
 #include <QRegularExpression>
 
@@ -474,11 +473,11 @@ inline bool loadPlyFallback(const QString& path, MeshCloud* out, QString* err,
                 continue;
             }
 
-            prop.offset = vertexStride;
-            vertexStride += prop.byteSize;
-
-            if (curElement == "vertex")
+            if (curElement == "vertex") {
+                prop.offset = vertexStride;
+                vertexStride += prop.byteSize;
                 vertexProps.append(prop);
+            }
         }
     }
 
@@ -546,24 +545,17 @@ inline bool loadPlyFallback(const QString& path, MeshCloud* out, QString* err,
         }
         out->count = static_cast<int>(got);
     } else {
-        // Binary: 直接用 QDataStream 按 stride 逐条读取
-        QDataStream ds(all.mid(dataStart));
-        ds.setByteOrder(format == PlyBinLE ? QDataStream::LittleEndian : QDataStream::BigEndian);
-        ds.setFloatingPointPrecision(QDataStream::SinglePrecision);
-
-        // 构建读取 buffer
-        QByteArray rowBuf(vertexStride, '\0');
+        // Binary: 直接用指针算术按 stride 逐条读取，避免 QDataStream 大文件兼容问题
+        const char* binPtr = all.constData() + dataStart;
+        const char* binEnd = all.constData() + all.size();
 
         for (long i = 0; i < vertexCount; ++i) {
-            if (ds.atEnd()) break;
-            int rd = ds.readRawData(rowBuf.data(), vertexStride);
-            if (rd < vertexStride) break;
+            if (binPtr + vertexStride > binEnd) break;
 
             auto readVal = [&](int propIdx) -> double {
                 const PlyProp& p = vertexProps[propIdx];
-                const char* ptr = rowBuf.constData() + p.offset;
+                const char* ptr = binPtr + p.offset;
                 if (p.byteSize == 1) {
-                    if (p.isFloat) return 0.0; // char 不可能是 float
                     return static_cast<double>(static_cast<unsigned char>(*ptr));
                 } else if (p.byteSize == 4) {
                     if (p.isFloat) {
@@ -588,6 +580,8 @@ inline bool loadPlyFallback(const QString& path, MeshCloud* out, QString* err,
                 const float a = (ia >= 0) ? static_cast<float>(readVal(ia) / (vertexProps[ia].isFloat ? 1.0 : 255.0)) : 1.0f;
                 out->colors << r << g << b << a;
             }
+
+            binPtr += vertexStride;
         }
         out->count = static_cast<int>(out->positions.size() / 3);
     }
