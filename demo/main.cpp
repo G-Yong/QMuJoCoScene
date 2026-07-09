@@ -262,7 +262,8 @@ int main(int argc, char *argv[])
         BunnyCloud bunny;
         if (!setupBunnyPointCloud(mujoco,
                                   QStringLiteral("../../../model/meshes/bunny.ply"),  // 也可换成 .stl/.obj 等格式
-                                  // QStringLiteral("C:/Users/Administrator/Desktop/123/3dImage/point_cloud_20260708_172233_839.ply"),  // 也可换成 .stl/.obj 等格式
+                                  // QStringLiteral("C:/Users/Administrator/Desktop/123/3dImage/point_cloud_20260708_172233_839.ply"),
+                                  // QStringLiteral("C:/Users/Administrator/Desktop/123/3dImage/wyj/trans.pcd"),
                                   3.0f, QVector3D(0.0f, 0.0f, 0.0f),
                                   0.00035f, &bunny)) {
             return;
