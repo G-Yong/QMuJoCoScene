@@ -356,6 +356,12 @@ public:
     // 仅修改 geom_rgba，不影响材质贴图；返回是否命中至少一个 geom。
     Q_INVOKABLE bool setObjectColor(int bodyId, const QVector4D& rgba);
 
+    // 返回 body 所有直属 geom 的 rgba（顺序与 MuJoCo body_geomadr 一致）。
+    // 用于碰撞高亮前保存各 geom 独立颜色，以便精确还原多 geom body。
+    Q_INVOKABLE QVector<QVector4D> objectGeomColors(int bodyId) const;
+    // 逐 geom 还原颜色；colors 长度须与 body_geomnum 一致，否则不足部分按最后一个色填充。
+    Q_INVOKABLE bool setObjectGeomColors(int bodyId, const QVector<QVector4D>& colors);
+
     // 按 MuJoCo body id 设置其直属 geoms 的碰撞属性，用于关闭/开启 MuJoCo 自身
     // 碰撞（例如把 body 抽离到 coal 做精确碰撞后，应设为 0 避免重复检测）。
     // contype：允许我去碰别人；conaffinity：允许别人来碰我；均为位掩码，0 表示不参与。

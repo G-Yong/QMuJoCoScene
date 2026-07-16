@@ -1925,6 +1925,44 @@ bool MujocoQuickItem::setObjectColor(int bodyId, const QVector4D& rgba)
     return applied;
 }
 
+QVector<QVector4D> MujocoQuickItem::objectGeomColors(int bodyId) const
+{
+    QVector<QVector4D> result;
+    withSimulation([&](const mjModel* model, mjData*) {
+        if (!model || bodyId < 0 || bodyId >= model->nbody) return;
+        const int geomCount = model->body_geomnum[bodyId];
+        const int firstGeom = model->body_geomadr[bodyId];
+        if (geomCount <= 0 || firstGeom < 0) return;
+        result.reserve(geomCount);
+        for (int i = 0; i < geomCount; ++i) {
+            const float* src = model->geom_rgba + 4 * (firstGeom + i);
+            result.append(QVector4D(src[0], src[1], src[2], src[3]));
+        }
+    });
+    return result;
+}
+
+bool MujocoQuickItem::setObjectGeomColors(int bodyId, const QVector<QVector4D>& colors)
+{
+    if (colors.isEmpty()) return false;
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        mjModel* model = sim.m_;
+        if (!model || bodyId < 0 || bodyId >= model->nbody) return;
+        const int geomCount = model->body_geomnum[bodyId];
+        const int firstGeom = model->body_geomadr[bodyId];
+        if (geomCount <= 0 || firstGeom < 0) return;
+        for (int i = 0; i < geomCount; ++i) {
+            const QVector4D& c = colors[qMin(i, colors.size() - 1)];
+            float* dst = model->geom_rgba + 4 * (firstGeom + i);
+            dst[0] = c.x(); dst[1] = c.y(); dst[2] = c.z(); dst[3] = c.w();
+        }
+        markUiRefresh(sim);
+        applied = true;
+    });
+    return applied;
+}
+
 bool MujocoQuickItem::setObjectContype(int bodyId, int contype)
 {
     bool applied = false;
