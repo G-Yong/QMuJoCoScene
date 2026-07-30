@@ -47,6 +47,12 @@ using Seconds = std::chrono::duration<double>;
 // MujocoQuickItem 成员函数实现）。
 using namespace mqi_detail;
 
+// 缓入缓出函数（cubic ease-in-out），用于相机过渡。
+static float easeInOutCubic(float t) {
+    return t < 0.5f ? 4.0f * t * t * t
+                     : 1.0f - std::pow(-2.0f * t + 2.0f, 3.0f) / 2.0f;
+}
+
 // ===========================================================================
 // MujocoFboRenderer：Qt Quick scenegraph 渲染线程
 // ===========================================================================
@@ -130,6 +136,7 @@ MujocoQuickItem::MujocoQuickItem(QQuickItem* parent)
     qRegisterMetaType<ActuatorInfo>();
     qRegisterMetaType<SceneObjectInfo>();
     qRegisterMetaType<ContactInfo>();
+    qRegisterMetaType<CameraState>();
     setMirrorVertically(true); // mjr 是 OpenGL bottom-up，Quick 绘制时翻一下
     setAcceptedMouseButtons(Qt::AllButtons);
     setAcceptHoverEvents(true);
@@ -2756,6 +2763,150 @@ bool MujocoQuickItem::setFreeCamera() {
     return applied;
 }
 
+CameraState MujocoQuickItem::cameraState() {
+    CameraState s;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        s.type         = sim.cam.type;
+        s.fixedcamid   = sim.cam.fixedcamid;
+        s.trackbodyid  = sim.cam.trackbodyid;
+        s.lookat       = QVector3D(float(sim.cam.lookat[0]),
+                                   float(sim.cam.lookat[1]),
+                                   float(sim.cam.lookat[2]));
+        s.distance     = sim.cam.distance;
+        s.azimuth      = sim.cam.azimuth;
+        s.elevation    = sim.cam.elevation;
+        s.orthographic = (sim.cam.orthographic != 0);
+    });
+    return s;
+}
+
+bool MujocoQuickItem::setCameraState(const CameraState& state) {
+    if (!m_sim) return false;
+
+    const int duration = m_cameraTransitionDuration.load();
+
+    if (duration <= 0) {
+        // 无过渡：立即跳转（原有行为）
+        bool applied = false;
+        bool orthoChanged = false;
+        withSimulateLocked([&](mujoco::Simulate& sim) {
+            const int oldOrtho = sim.cam.orthographic;
+            sim.cam.type          = state.type;
+            sim.cam.fixedcamid    = state.fixedcamid;
+            sim.cam.trackbodyid   = state.trackbodyid;
+            sim.cam.lookat[0]     = state.lookat.x();
+            sim.cam.lookat[1]     = state.lookat.y();
+            sim.cam.lookat[2]     = state.lookat.z();
+            sim.cam.distance      = state.distance;
+            sim.cam.azimuth       = state.azimuth;
+            sim.cam.elevation     = state.elevation;
+            sim.cam.orthographic  = state.orthographic ? 1 : 0;
+            if (state.type == mjCAMERA_FIXED) {
+                sim.camera = state.fixedcamid + 2;
+            } else if (state.type == mjCAMERA_TRACKING) {
+                sim.camera = 1;
+            } else {
+                sim.camera = 0;
+            }
+            sim.pending_.ui_update_rendering = true;
+            orthoChanged = (oldOrtho != sim.cam.orthographic);
+            applied = true;
+        });
+        if (orthoChanged) emit orthographicCameraChanged();
+        return applied;
+    }
+
+    // 有过渡：捕获当前相机状态作为起点，后续由 onFrameRendered 驱动插值
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        // 捕获起点（当前 sim.cam）
+        m_camTransition.start.type         = sim.cam.type;
+        m_camTransition.start.fixedcamid   = sim.cam.fixedcamid;
+        m_camTransition.start.trackbodyid  = sim.cam.trackbodyid;
+        m_camTransition.start.lookat       = QVector3D(float(sim.cam.lookat[0]),
+                                                        float(sim.cam.lookat[1]),
+                                                        float(sim.cam.lookat[2]));
+        m_camTransition.start.distance     = sim.cam.distance;
+        m_camTransition.start.azimuth      = sim.cam.azimuth;
+        m_camTransition.start.elevation    = sim.cam.elevation;
+        m_camTransition.start.orthographic = (sim.cam.orthographic != 0);
+
+        m_camTransition.target      = state;
+        m_camTransition.startTime   = std::chrono::steady_clock::now();
+        m_camTransition.durationMs  = duration;
+        m_camTransition.active      = true;
+
+        // 离散字段立即生效（不参与插值）
+        sim.cam.type         = state.type;
+        sim.cam.fixedcamid   = state.fixedcamid;
+        sim.cam.trackbodyid  = state.trackbodyid;
+        sim.cam.orthographic = state.orthographic ? 1 : 0;
+        if (state.type == mjCAMERA_FIXED) {
+            sim.camera = state.fixedcamid + 2;
+        } else if (state.type == mjCAMERA_TRACKING) {
+            sim.camera = 1;
+        } else {
+            sim.camera = 0;
+        }
+        sim.pending_.ui_update_rendering = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::resetCameraToDefault() {
+    // 取消任何活跃的相机过渡
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        m_camTransition.active = false;
+    });
+
+    bool applied = false;
+    bool orthoChanged = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        const int oldOrtho = sim.cam.orthographic;
+        mjv_defaultCamera(&sim.cam);
+        sim.camera = 0;
+        sim.pending_.ui_update_rendering = true;
+        orthoChanged = (oldOrtho != sim.cam.orthographic);
+        applied = true;
+    });
+    if (orthoChanged) emit orthographicCameraChanged();
+    return applied;
+}
+
+void MujocoQuickItem::applyCameraTransitionLocked(mujoco::Simulate& sim) {
+    if (!m_camTransition.active) return;
+
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - m_camTransition.startTime).count();
+
+    float t = std::min(1.0f, float(elapsed) / float(m_camTransition.durationMs));
+    const float et = easeInOutCubic(t);
+
+    const auto& s = m_camTransition.start;
+    const auto& g = m_camTransition.target;
+
+    // 线性插值连续参数
+    sim.cam.lookat[0] = s.lookat.x() + (g.lookat.x() - s.lookat.x()) * et;
+    sim.cam.lookat[1] = s.lookat.y() + (g.lookat.y() - s.lookat.y()) * et;
+    sim.cam.lookat[2] = s.lookat.z() + (g.lookat.z() - s.lookat.z()) * et;
+    sim.cam.distance  = s.distance + (g.distance - s.distance) * et;
+    sim.cam.azimuth   = s.azimuth + (g.azimuth - s.azimuth) * et;
+    sim.cam.elevation = s.elevation + (g.elevation - s.elevation) * et;
+
+    sim.pending_.ui_update_rendering = true;
+
+    if (t >= 1.0f) {
+        m_camTransition.active = false;
+    }
+}
+
+void MujocoQuickItem::setCameraTransitionDuration(int ms) {
+    if (ms < 0) ms = 0;
+    if (m_cameraTransitionDuration.exchange(ms) == ms) return;
+    emit cameraTransitionDurationChanged();
+}
+
 bool MujocoQuickItem::orthographicCamera() {
     bool ortho = false;
     withSimulateLocked([&](mujoco::Simulate& sim) {
@@ -3114,6 +3265,8 @@ void MujocoQuickItem::onFrameRendered() {
             m_simulationRunning.store(simRunning);
             simRunChanged = true;
         }
+        // 相机平滑过渡：每帧按流逝时间插值
+        applyCameraTransitionLocked(*m_sim);
     }
 
     QMetaObject::invokeMethod(this, [this, statusText, contacts = std::move(contacts), simRunChanged] {

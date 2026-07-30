@@ -242,3 +242,46 @@ public:
     QVector3D normal;             // 接触法向量（接触帧首行）
 };
 Q_DECLARE_METATYPE(ContactInfo)
+
+// ---------------------------------------------------------------------------
+// CameraState — 抽象相机（mjvCamera）状态快照，用于保存/恢复视角。
+//
+// 字段与 MuJoCo mjvCamera 一一对应（mjvisualize.h）：
+//
+//   type    — mjtCamera 枚举值：
+//                0 = mjCAMERA_FREE      （自由旋转相机）
+//                1 = mjCAMERA_TRACKING  （跟踪指定 body）
+//                2 = mjCAMERA_FIXED     （固定到场景相机）
+//   fixedcamid   — type=FIXED 时使用的场景相机 id（-1 表示未使用）。
+//   trackbodyid  — type=TRACKING 时跟踪的 body id（-1 表示未使用）。
+//   lookat       — 相机注视点（世界坐标）。
+//   distance     — 相机到注视点的距离。
+//   azimuth      — 相机方位角（度）。
+//   elevation    — 相机仰角（度）。
+//   orthographic — true 为正交投影，false 为透视投影。
+//
+// 典型用法：
+//   QML:  var cs = view.cameraState(); ... view.setCameraState(cs)
+//   C++:  CameraState cs = item->cameraState(); item->setCameraState(cs)
+// ---------------------------------------------------------------------------
+struct CameraState {
+    Q_GADGET
+    Q_PROPERTY(int      type         MEMBER type         CONSTANT)
+    Q_PROPERTY(int      fixedcamid   MEMBER fixedcamid   CONSTANT)
+    Q_PROPERTY(int      trackbodyid  MEMBER trackbodyid  CONSTANT)
+    Q_PROPERTY(QVector3D lookat       MEMBER lookat       CONSTANT)
+    Q_PROPERTY(double   distance     MEMBER distance     CONSTANT)
+    Q_PROPERTY(double   azimuth      MEMBER azimuth      CONSTANT)
+    Q_PROPERTY(double   elevation    MEMBER elevation    CONSTANT)
+    Q_PROPERTY(bool     orthographic MEMBER orthographic CONSTANT)
+public:
+    int      type         = 0;    // mjtCamera: FREE=0, TRACKING=1, FIXED=2
+    int      fixedcamid   = -1;
+    int      trackbodyid  = -1;
+    QVector3D lookat      = {0.0f, 0.0f, 0.0f};
+    double   distance     = 0.0;
+    double   azimuth      = 0.0;
+    double   elevation    = 0.0;
+    bool     orthographic = false;
+};
+Q_DECLARE_METATYPE(CameraState)

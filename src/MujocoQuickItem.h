@@ -83,6 +83,7 @@ class MUJOCOQUICKITEM_EXPORT MujocoQuickItem : public QQuickFramebufferObject, p
     Q_PROPERTY(QString statusOverlayText READ statusOverlayText NOTIFY statusOverlayTextChanged)
     Q_PROPERTY(QString modelTitle READ modelTitle NOTIFY modelTitleChanged)
     Q_PROPERTY(QVariantList contacts READ contacts NOTIFY contactsChanged)
+    Q_PROPERTY(int cameraTransitionDuration READ cameraTransitionDuration WRITE setCameraTransitionDuration NOTIFY cameraTransitionDurationChanged)
 public:
     enum PrimitiveType {
         PrimitiveBox = 0,
@@ -522,6 +523,20 @@ public:
     Q_INVOKABLE bool setFreeCamera();
     Q_INVOKABLE bool setTrackingCamera(int bodyId = -1);
 
+    // 读取/恢复抽象相机的完整状态（视角、注视点、投影类型等），用于场景切换后
+    // 保持与上次相同的观看角度。QML 中 CameraState 是普通 JS 对象，可序列化保存。
+    Q_INVOKABLE CameraState cameraState();
+    // 设置相机状态。若 cameraTransitionDuration > 0，从当前视角平滑过渡到目标
+    // 视角（缓入缓出）；设为 0 则立即跳转。
+    Q_INVOKABLE bool setCameraState(const CameraState& state);
+    // 恢复抽象相机到默认状态（与场景首次加载时一致），如有活跃过渡则取消并立即跳转。
+    Q_INVOKABLE bool resetCameraToDefault();
+
+    // 相机过渡时长（毫秒），默认 0 表示立即跳转无过渡。
+    // 设为 500 时 setCameraState 会执行 500ms 平滑过渡。
+    int cameraTransitionDuration() const { return m_cameraTransitionDuration.load(); }
+    Q_INVOKABLE void setCameraTransitionDuration(int ms);
+
     // 切换正交/透视投影。orthographic=true 为正交投影，false 为透视投影。
     // 修改立即生效，会触发渲染更新。
     bool orthographicCamera();
@@ -651,6 +666,7 @@ signals:
     void modelTitleChanged();
     // 当前接触快照发生实际变动时发出。
     void contactsChanged();
+    void cameraTransitionDurationChanged();
 
     // 场景加载结果通知
     void sceneLoaded(const QString& source);
@@ -748,6 +764,24 @@ private:
     // 接触快照：由 onFrameRendered() 在主线程按需更新，contactCount()/contact()/contacts() 读取。
     // 仅在主线程访问，无需额外锁。
     QList<ContactInfo> m_contactSnapshot;
+
+    // ------------------------------------------------------------------
+    // 相机过渡状态（setCameraState 平滑过渡）
+    // ------------------------------------------------------------------
+    // 从主线程 setCameraState 写入（持 m_sim->mtx），渲染线程 onFrameRendered
+    // 读取并应用插值（同样持 m_sim->mtx），因此无需额外锁。
+    struct CameraTransitionState {
+        bool        active = false;
+        CameraState start;
+        CameraState target;
+        std::chrono::steady_clock::time_point startTime;
+        int         durationMs = 500;
+    };
+    CameraTransitionState   m_camTransition;
+    std::atomic<int>        m_cameraTransitionDuration {0};
+
+    // 在 m_sim->mtx 锁内调用：若过渡活跃则按流逝时间插值写入 sim.cam。
+    void applyCameraTransitionLocked(mujoco::Simulate& sim);
 
     // ------------------------------------------------------------------
     // 轨迹（尾迹）状态
