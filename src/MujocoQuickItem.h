@@ -667,6 +667,8 @@ signals:
     // 当前接触快照发生实际变动时发出。
     void contactsChanged();
     void cameraTransitionDurationChanged();
+    // 场景区域被鼠标按下时发出（任意键）。
+    void mousePressed();
 
     // 场景加载结果通知
     void sceneLoaded(const QString& source);

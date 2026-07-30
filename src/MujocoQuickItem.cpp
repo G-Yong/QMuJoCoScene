@@ -3350,6 +3350,7 @@ void MujocoQuickItem::updateModifiersFrom(int qtMods) {
 
 void MujocoQuickItem::mousePressEvent(QMouseEvent* e) {
     forceActiveFocus();
+    emit mousePressed();
     if (!m_adapterRaw) { QQuickFramebufferObject::mousePressEvent(e); return; }
     updateModifiersFrom(int(e->modifiers()));
     m_adapterRaw->PostMouseButton(qtMouseButtonToInternal(int(e->button())), 1,
