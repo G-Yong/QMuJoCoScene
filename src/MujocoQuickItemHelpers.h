@@ -451,6 +451,22 @@ inline void setFreeJointOrientation(mjModel* model, mjData* data,
     }
 }
 
+// 在持有 sim.mtx 时调用：把 hinge/slide 关节值写到 d->qpos 与 sim 缓存向量
+// （qpos_/qpos_prev_），三者保持一致，避免下一帧 Simulate::Sync 把旧缓存回写
+// 覆盖归零结果（与 setFreeJointPosition 相同的三缓存同步模式）。
+inline void setHingeJointValue(mjModel* model, mjData* data,
+                               std::vector<mjtNum>& qposCache,
+                               std::vector<mjtNum>& qposPrevCache,
+                               int jointId, double value) {
+    if (!model || !data || jointId < 0) return;
+    const int adr = model->jnt_qposadr[jointId];
+    data->qpos[adr] = static_cast<mjtNum>(value);
+    if (qposCache.size() >= static_cast<size_t>(adr + 1))
+        qposCache[adr] = static_cast<mjtNum>(value);
+    if (qposPrevCache.size() >= static_cast<size_t>(adr + 1))
+        qposPrevCache[adr] = static_cast<mjtNum>(value);
+}
+
 // mj_recompile 之后，sim.qpos_ / qpos_prev_ 仍保持旧 nq。
 // 重新 resize 并从 d_->qpos 同步，避免 Simulate::Sync() 越界读到的旧
 // 缓存数据被回写到 d_->qpos，造成新加 free-joint body 的位置被

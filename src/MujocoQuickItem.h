@@ -445,6 +445,9 @@ public:
     // 按关节名称设置单自由度值，内部查找 joint index 后调用 setJointValue。
     // 仅适用于 hinge / slide 关节。
     Q_INVOKABLE bool setJointValueByName(const QString& name, double value);
+    // 立即写关节值（hinge/slide）：同步 d->qpos / qpos_ / qpos_prev_ 三缓存并 mj_forward，
+    // 立刻反映到世界位姿。区别于 setJointValueByName（仅写缓存，下一帧 Sync 才生效）。
+    Q_INVOKABLE bool setJointValueByNameSync(const QString& name, double value);
     // 设置关节在父 body 局部坐标系中的锚点位置（修改 mjModel::jnt_pos）。
     // 仅对 hinge / slide / ball 关节有效；free joint 的 pos 无意义，返回 false。
     // 写入后自动调用 mj_forward 更新运动学。

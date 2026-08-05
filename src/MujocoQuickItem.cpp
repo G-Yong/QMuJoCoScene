@@ -2392,6 +2392,23 @@ bool MujocoQuickItem::setJointValueByName(const QString& name, double value)
     return applied;
 }
 
+bool MujocoQuickItem::setJointValueByNameSync(const QString& name, double value)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_) return;
+        const int id = mj_name2id(sim.m_, mjOBJ_JOINT, name.toUtf8().constData());
+        if (!isValidIndex(id, static_cast<int>(sim.m_->njnt))) return;
+        const int type = sim.m_->jnt_type[id];
+        if (type != mjJNT_SLIDE && type != mjJNT_HINGE) return;
+        setHingeJointValue(sim.m_, sim.d_, sim.qpos_, sim.qpos_prev_, id, value);
+        mj_forward(sim.m_, sim.d_);
+        markUiRefresh(sim);
+        applied = true;
+    });
+    return applied;
+}
+
 bool MujocoQuickItem::setJointAnchorPos(int index, const QVector3D& pos)
 {
     bool applied = false;
