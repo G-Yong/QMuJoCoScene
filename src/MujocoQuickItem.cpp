@@ -2644,14 +2644,29 @@ double MujocoQuickItem::control(int index) const
     return val;
 }
 
+// 写穿到 d->ctrl：在 sim.mtx 锁内把控制值同时写入 staging(ctrl_)、物理数据
+// (d_->ctrl) 与已应用值(ctrl_prev_)，让值在下一个 mj_step 立即生效，而不是攒在
+// ctrl_ 里等下一帧 RenderLoop 的 Sync() 按渲染帧(约60Hz)批量写回——否则 50Hz 的
+// 关节指令与渲染帧相位偶合时会"两帧一起跳"，物理端直线中段冒出随机突起。
+static inline void applyControlImmediately(mujoco::Simulate& sim, int id, double value)
+{
+    if (!sim.m_ || id < 0 || id >= static_cast<int>(sim.m_->nu))
+        return;
+    sim.ctrl_[id] = value;
+    if (sim.d_)
+        sim.d_->ctrl[id] = value;
+    if (static_cast<size_t>(id) < sim.ctrl_prev_.size())
+        sim.ctrl_prev_[id] = value;
+    sim.pending_.ui_update_simulation = true;
+}
+
 bool MujocoQuickItem::setControl(int index, double value)
 {
     bool applied = false;
     withSimulateLocked([&](mujoco::Simulate& sim) {
         if (!sim.m_ || !sim.d_) return;
         if (!isValidIndex(index, static_cast<int>(sim.m_->nu))) return;
-        sim.ctrl_[index] = value;
-        sim.pending_.ui_update_simulation = true;
+        applyControlImmediately(sim, index, value);
         applied = true;
     });
     return applied;
@@ -2664,8 +2679,7 @@ bool MujocoQuickItem::setControlByName(const QString& name, double value)
         if (!sim.m_ || !sim.d_) return;
         const int id = mj_name2id(sim.m_, mjOBJ_ACTUATOR, name.toUtf8().constData());
         if (!isValidIndex(id, static_cast<int>(sim.m_->nu))) return;
-        sim.ctrl_[id] = value;
-        sim.pending_.ui_update_simulation = true;
+        applyControlImmediately(sim, id, value);
         applied = true;
     });
     return applied;
@@ -2690,8 +2704,7 @@ bool MujocoQuickItem::setControls(const QVariantList& values)
         const int nu = static_cast<int>(sim.m_->nu);
         if (values.size() != nu) return;
         for (int i = 0; i < nu; ++i)
-            sim.ctrl_[i] = values[i].toDouble();
-        sim.pending_.ui_update_simulation = true;
+            applyControlImmediately(sim, i, values[i].toDouble());
         applied = true;
     });
     return applied;
