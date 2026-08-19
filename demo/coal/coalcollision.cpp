@@ -10,7 +10,6 @@
 
 #include <QHash>
 #include <memory>
-#include <vector>
 
 
 CoalCollision::CoalCollision(QObject *parent)

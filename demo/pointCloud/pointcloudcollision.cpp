@@ -1,5 +1,5 @@
-#include "pointcloudcollision.h"
-#include "CoalBodyRegistry.h"
+#include "pointCloud/pointcloudcollision.h"
+#include "coal/CoalBodyRegistry.h"
 
 #include <mujoco/mujoco.h>
 
@@ -17,7 +17,6 @@
 #include <QVariantList>
 #include <QDebug>
 #include <algorithm>
-#include <cmath>
 #include <cstring>
 #include <vector>
 

@@ -23,9 +23,10 @@ https://github.com/user-attachments/assets/49a18818-608c-457d-b89a-a16b8b40a035
 - **三线程架构**：渲染线程、物理仿真线程、Qt 主线程各司其职，互不阻塞。
 - **拖拽加载模型**：直接将 `.xml` / `.mjb` 文件拖入窗口即可热切换模型。
 - **独立 GPU 优先**：导出 `NvOptimusEnablement` / `AmdPowerXpressRequestHighPerformance` 符号，在双显卡笔记本上自动选用独立 GPU。
-- **物体运动轨迹可视化**：在 `MujocoQuickItem` 中添加了 [`addTrajectory`](https://github.com/G-Yong/QMuJoCoScene/blob/master/src/MujocoQuickItem.h#L171) 以及 [`setTrajectoryTrackedSite`](https://github.com/G-Yong/QMuJoCoScene/blob/master/src/MujocoQuickItem.h#L200) 等接口，允许用户在 QML 端创建和管理轨迹对象，实时可视化指定物体的运动轨迹（动态刷新）。
+- **物体运动轨迹可视化**：`MujocoQuickItem` 提供的 `addTrajectory` / `setTrajectoryTrackedSite` 等接口（见 [`MujocoQuickItem.h`](https://github.com/G-Yong/QMuJoCoScene/blob/master/src/MujocoQuickItem.h)），允许用户在 QML 端创建和管理轨迹对象，实时可视化指定物体的运动轨迹（动态刷新）。
 - **点云渲染**：通过 GPU `GL_POINTS` 叠加层实现高性能点云可视化，共享 MuJoCo 渲染帧缓冲的深度缓冲（reverse-Z），与场景几何正确互遮挡。一次 draw call，百万级点。支持四种渲染样式：`PointStylePixel`（固定像素）、`PointStyleSquare`（世界尺寸方形）、`PointStyleCircle`（世界尺寸圆形）、`PointStyleSphere`（世界尺寸、球面着色 billboard）。支持逐点颜色、统一颜色、地面倒影（仿 MuJoCo 反射地面）。
 - **点云碰撞检测**：点云数据通过 `pointCloudPoints()` 等线程安全访问器暴露给外部碰撞库（如 [coal](https://github.com/coal-library/coal)），外部库的接触结果经 `withMutableSimulation()` 写回 MuJoCo。详见 `demo/pointcloudcollision.{h,cpp}` 示例。提供高效 C++ 扁平数组接口（`setPointCloudData`，避免 QVariant 装箱开销）和 QML 友好的 QVariant 接口（`addPointCloud` / `updatePointCloudPoints` / `setPointCloudColors`）。
+
 ## 架构
 
 ```
@@ -53,9 +54,7 @@ Qt 主线程
 | `MujocoFboRenderer` | scenegraph 渲染线程端：把共享纹理 blit 到 Quick 提供的 FBO |
 | `QtPlatformUIAdapter` | 实现 `mujoco::PlatformUIAdapter`：offscreen FBO 管理、共享纹理创建、帧节拍 CV、事件队列 |
 
-`MujocoQuickItem.h` 是可交付给外部客户的公共头文件。它只包含 Qt / C++ 标准库头和 `simulationtypes.h`，不包含 MuJoCo 或 `simulate` 目录下的头文件；需要 `mjModel` / `mjData` 的高级回调接口仅在头文件中前向声明类型。真正依赖 MuJoCo 的 `QtPlatformUIAdapter.h`、`simulate.h`、`mujoco.h` 只在实现文件或内部适配器头中使用。
-
-在 `RobotSimulator` 动态库中集成时，构建系统通过 `MUJOCOQUICKITEM_EXPORT=Q_DECL_EXPORT` 导出 `MujocoQuickItem`。交付头 `simulationview.h` 会在包含 `MujocoQuickItem.h` 前将 `MUJOCOQUICKITEM_EXPORT` 映射为 `ROBOTSIMULATOR_EXPORT`，因此客户仍可使用兼容的 `RobotSim::SimulationView` 类型名；该类型名现在是 `MujocoQuickItem` 的别名，不再维护一层重复转发封装。
+`MujocoQuickItem.h` 是可交付给外部客户的公共头文件。它只包含 Qt / C++ 标准库头，以及轻量的 `IMujocoHost.h`、`simulationtypes.h`，不包含 MuJoCo 或 `simulate` 目录下的头文件；需要 `mjModel` / `mjData` 的高级回调接口仅在头文件中前向声明类型。真正依赖 MuJoCo 的 `QtPlatformUIAdapter.h`、`simulate.h`、`mujoco.h` 只在实现文件或内部适配器头中使用。
 
 ### 关键设计说明
 
@@ -110,49 +109,44 @@ extern "C" {
 **C++ 端**：在 `.pro` 文件中引入，并在 `main()` 里注册 QML 类型：
 
 ```qmake
-include(path/to/src/QMuJoCoScene.pri)
+include(path/to/src/qmujocoscene.pri)
 ```
 
 ```cpp
 // main.cpp
+#include "MujocoQuickItem.h"
+
 QGuiApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
 QGuiApplication::setAttribute(Qt::AA_ShareOpenGLContexts); // 必须
 
-qmlRegisterType<MujocoQuickItem>("QMuJoCoScene", 1, 0, "MujocoView");
+// QML 模块名（URI）可任意指定，只要与 .qml 里的 import 一致即可
+qmlRegisterType<MujocoQuickItem>("Mujoco", 1, 0, "MujocoView");
 ```
 
 **QML 端**：
 
 ```qml
-import QMuJoCoScene 1.0
+import Mujoco 1.0
 
 MujocoView {
+    id: mujocoView
+    objectName: "mujocoView"
     anchors.fill: parent
     focus: true
 
-    Component.onCompleted: start("path/to/model.xml")
+    Component.onCompleted: loadScene("path/to/model.xml")
 }
 ```
 
 **C++ 热切换模型**（线程安全）：
 
 ```cpp
-mujocoViewItem->loadScene("new_model.xml");
+// 从 QML 场景取回 MujocoView 实例（objectName 需与 .qml 中的一致）
+auto *mujocoViewItem =
+    engine.rootObjects().first()->findChild<MujocoQuickItem*>("mujocoView");
+if (mujocoViewItem)
+    mujocoViewItem->loadScene("new_model.xml");
 ```
-
-**通过 RobotSimulator 交付库使用**：
-
-```cpp
-#include "robotSimulator.h"
-
-RobotSim::SimulationController controller;
-RobotSim::SimulationView *view = controller.simulationView();
-
-view->setSimulationRunning(false);
-view->loadScene("robot.mjb");
-```
-
-`RobotSim::SimulationView` 只是兼容旧代码的类型别名，所有属性、信号和 `Q_INVOKABLE` 方法都来自 `MujocoQuickItem` 本体。`SimulationController` 创建的视图默认关闭左右 MuJoCo 内置 UI；直接实例化 `MujocoQuickItem` 时仍保留 QMuJoCoScene demo 的默认 UI 行为。
 
 **QML 拖拽加载**：demo 中的 `DropArea` 示例可直接复用，将 `.xml` / `.mjb` 拖入窗口即可切换。
 

@@ -20,17 +20,17 @@ include(../src/qmujocoscene.pri)
 # 源文件 / 资源
 # ----------------------------------------------------------------------------
 SOURCES += \
-    coalcollision.cpp \
-    pointcloudcollision.cpp \
+    coal/coalcollision.cpp \
+    pointCloud/pointcloudcollision.cpp \
     main.cpp
 
 RESOURCES += qml.qrc
 
 HEADERS += \
-    coalcollision.h \
-    pointcloudcollision.h \
-    assimploader.h \
-    CoalBodyRegistry.h
+    coal/coalcollision.h \
+    pointCloud/pointcloudcollision.h \
+    pointCloud/assimploader.h \
+    coal/CoalBodyRegistry.h
 
 
 INCLUDEPATH += $$PWD/../thirdparty/coal/include

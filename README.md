@@ -23,7 +23,7 @@ https://github.com/user-attachments/assets/49a18818-608c-457d-b89a-a16b8b40a035
 - **Three-thread architecture**: The render thread, physics simulation thread, and Qt main thread each have a dedicated role and never block one another.
 - **Drag-and-drop model loading**: Drop a `.xml` or `.mjb` file directly onto the window to hot-swap the model.
 - **Discrete GPU preference**: Exports `NvOptimusEnablement` / `AmdPowerXpressRequestHighPerformance` symbols so the driver automatically selects the discrete GPU on dual-GPU laptops.
-- **Object trajectory visualisation**: [`addTrajectory`](https://github.com/G-Yong/QMuJoCoScene/blob/master/src/MujocoQuickItem.h#L171) and [`setTrajectoryTrackedSite`](https://github.com/G-Yong/QMuJoCoScene/blob/master/src/MujocoQuickItem.h#L200) APIs let users create and manage trajectory objects from QML, providing real-time visualisation of body motion paths (dynamically updated each frame).
+- **Object trajectory visualisation**: The `addTrajectory` and `setTrajectoryTrackedSite` APIs in [`MujocoQuickItem.h`](https://github.com/G-Yong/QMuJoCoScene/blob/master/src/MujocoQuickItem.h) let users create and manage trajectory objects from QML, providing real-time visualisation of body motion paths (dynamically updated each frame).
 - **Point cloud rendering**: High-performance point cloud visualisation via a GPU `GL_POINTS` overlay layer that shares MuJoCo's depth buffer (reverse-Z) for correct occlusion with scene geometry. Millions of points in a single draw call. Four render styles: `PointStylePixel` (fixed screen pixels), `PointStyleSquare` (world-size square), `PointStyleCircle` (world-size circle), `PointStyleSphere` (world-size sphere billboard with shading). Per-point colours, uniform colours, and ground reflections (matching MuJoCo's reflective floor).
 - **Point cloud collision detection**: Point cloud data is exposed to external collision libraries (e.g. [coal](https://github.com/coal-library/coal)) via thread-safe accessors such as `pointCloudPoints()`. Contact results from the external library are fed back into MuJoCo through `withMutableSimulation()`. See `demo/pointcloudcollision.{h,cpp}` for a complete example. Offers both a high-performance C++ flat-array API (`setPointCloudData`, avoiding QVariant boxing overhead) and a QML-friendly QVariant API (`addPointCloud` / `updatePointCloudPoints` / `setPointCloudColors`).
 
@@ -54,9 +54,7 @@ Qt Main Thread
 | `MujocoFboRenderer` | Scene-graph-thread side: blits the shared texture into the FBO provided by Qt Quick |
 | `QtPlatformUIAdapter` | Implements `mujoco::PlatformUIAdapter`: offscreen FBO management, shared texture creation, frame-pace condition variable, event queue |
 
-`MujocoQuickItem.h` is the public header intended for external consumers. It only includes Qt / C++ standard library headers and `simulationtypes.h`; it never includes MuJoCo or `simulate` headers. Advanced callback interfaces that require `mjModel` / `mjData` use only forward-declared types in the header. `QtPlatformUIAdapter.h`, `simulate.h`, and `mujoco.h` are confined to implementation files or internal adapter headers.
-
-When integrated into the `RobotSimulator` shared library, the build system exports `MujocoQuickItem` via `MUJOCOQUICKITEM_EXPORT=Q_DECL_EXPORT`. The delivery header `simulationview.h` remaps `MUJOCOQUICKITEM_EXPORT` to `ROBOTSIMULATOR_EXPORT` before including `MujocoQuickItem.h`, so consumers can continue using the compatible `RobotSim::SimulationView` type name — which is now a plain alias for `MujocoQuickItem` with no forwarding wrapper.
+`MujocoQuickItem.h` is the public header intended for external consumers. It only includes Qt / C++ standard library headers plus the lightweight `IMujocoHost.h` and `simulationtypes.h`; it never includes MuJoCo or `simulate` headers. Advanced callback interfaces that require `mjModel` / `mjData` use only forward-declared types in the header. `QtPlatformUIAdapter.h`, `simulate.h`, and `mujoco.h` are confined to implementation files or internal adapter headers.
 
 ### Key Design Decisions
 
@@ -111,49 +109,45 @@ extern "C" {
 **C++ side** — include in your `.pro` file and register the QML type in `main()`:
 
 ```qmake
-include(path/to/src/QMuJoCoScene.pri)
+include(path/to/src/qmujocoscene.pri)
 ```
 
 ```cpp
 // main.cpp
+#include "MujocoQuickItem.h"
+
 QGuiApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
 QGuiApplication::setAttribute(Qt::AA_ShareOpenGLContexts); // required
 
-qmlRegisterType<MujocoQuickItem>("QMuJoCoScene", 1, 0, "MujocoView");
+// The QML module URI is arbitrary — it must match the `import` in your QML files.
+qmlRegisterType<MujocoQuickItem>("Mujoco", 1, 0, "MujocoView");
 ```
 
 **QML side**:
 
 ```qml
-import QMuJoCoScene 1.0
+import Mujoco 1.0
 
 MujocoView {
+    id: mujocoView
+    objectName: "mujocoView"
     anchors.fill: parent
     focus: true
 
-    Component.onCompleted: start("path/to/model.xml")
+    Component.onCompleted: loadScene("path/to/model.xml")
 }
 ```
 
 **Hot-swap model from C++** (thread-safe):
 
 ```cpp
-mujocoViewItem->loadScene("new_model.xml");
+// Retrieve the MujocoView instance from the QML scene.
+// The objectName must match the one set in your .qml file.
+auto *mujocoViewItem =
+    engine.rootObjects().first()->findChild<MujocoQuickItem*>("mujocoView");
+if (mujocoViewItem)
+    mujocoViewItem->loadScene("new_model.xml");
 ```
-
-**Via the RobotSimulator delivery library**:
-
-```cpp
-#include "robotSimulator.h"
-
-RobotSim::SimulationController controller;
-RobotSim::SimulationView *view = controller.simulationView();
-
-view->setSimulationRunning(false);
-view->loadScene("robot.mjb");
-```
-
-`RobotSim::SimulationView` is a compatibility alias; all properties, signals, and `Q_INVOKABLE` methods come from `MujocoQuickItem` itself. Views created by `SimulationController` disable the left and right MuJoCo built-in UI panels by default. Directly instantiating `MujocoQuickItem` preserves the QMuJoCoScene demo's default UI behaviour.
 
 **QML drag-and-drop**: The `DropArea` example in the demo can be reused directly — drag a `.xml` or `.mjb` file onto the window to switch models.
 

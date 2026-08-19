@@ -1,6 +1,6 @@
 #include "MujocoQuickItem.h"
-#include "pointcloudcollision.h"
-#include "assimploader.h"
+#include "pointCloud/pointcloudcollision.h"
+#include "pointCloud/assimploader.h"
 
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
