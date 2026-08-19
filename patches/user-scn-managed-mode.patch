@@ -1,7 +1,7 @@
 diff --git a/mujoco-3.8.0-windows-x86_64/simulate/simulate.cc b/mujoco-3.8.0-windows-x86_64/simulate/simulate.cc
 --- a/mujoco-3.8.0-windows-x86_64/simulate/simulate.cc
 +++ b/mujoco-3.8.0-windows-x86_64/simulate/simulate.cc
-@@ -2308,6 +2308,32 @@
+@@ -2308,6 +2308,33 @@
    // update scene or sync data from user in passive mode
    if (!is_passive_) {
      mjv_updateScene(m_, d_, &this->opt, &this->pert, &this->cam, mjCAT_ALL, &this->scn);

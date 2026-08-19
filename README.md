@@ -170,15 +170,36 @@ To work around this, a `status_overlay` toggle and a `status_overlay_text` read-
 were added to `Simulate`, then exposed to QML through the
 `MujocoQuickItem::statusOverlayVisible` / `statusOverlayText` properties.
 
-[See `patches/status-overlay.patch`](patches/status-overlay.patch) — 4 change sites in total.
+[See `patches/status-overlay.patch`](patches/status-overlay.patch) — 6 change sites in total (4 in `simulate.cc`, 2 in `simulate.h`).
 
 ### Upgrade Steps
 
+Both patches touch `simulate/simulate.cc` (and `status-overlay.patch` also modifies
+`simulate/simulate.h`). Their paths embed the old version directory
+(`mujoco-3.8.0-windows-x86_64/...`), so `git apply --directory=...` does **not** work —
+rewrite the version prefix into temporary copies and apply from the repository root:
+
 1. Place the new `mujoco-X.Y.Z-windows-x86_64/` directory alongside this repository and update `MUJOCO_DIR` in `src/QMuJoCoScene.pri`.
-2. Inside the new `simulate/` directory, run:
+2. From the repository root, run (replace `X.Y.Z` with the actual new version):
    ```bash
-   git apply --directory=mujoco-X.Y.Z-windows-x86_64 patches/status-overlay.patch
+   sed 's/mujoco-3\.8\.0-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
+       patches/status-overlay.patch        > /tmp/status-overlay.patch
+   sed 's/mujoco-3\.8\.0-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
+       patches/user-scn-managed-mode.patch > /tmp/user-scn-managed-mode.patch
+
+   git apply /tmp/status-overlay.patch
+   git apply /tmp/user-scn-managed-mode.patch
    ```
-   If the patch cannot be applied automatically due to context drift, merge manually. There are **4 change sites**:
+   If a patch fails due to context drift (typically on larger version jumps), merge
+   manually using the change sites below.
+
+3. `patches/status-overlay.patch` — **6 change sites** (4 in `simulate.cc`, 2 in `simulate.h`):
    - `simulate.h`: add the `status_overlay` field below `pause_update`; add the `status_overlay_text` field below `load_error`.
    - `simulate.cc`: add `UpdateStatusOverlayText()` after `zoom_increment`; call it at the start of `Render()`; gate both overlay-drawing calls behind the `status_overlay` toggle.
+
+4. `patches/user-scn-managed-mode.patch` — **1 change site**:
+   - `simulate.cc` `Sync()`: in the non-passive branch (`if (!is_passive_)`), after
+     `mjv_updateScene(...)`, append `user_scn`'s geoms to `scn` and sync its rendering
+     flags (mirroring the logic the passive branch already has natively), so that
+     visual-only primitives injected via `Simulate::user_scn` are rendered in managed
+     mode.

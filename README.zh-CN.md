@@ -167,15 +167,34 @@ MuJoCo 官方提供了丰富的示例模型，可在 [MuJoCo 模型库](https://
 为此给 `Simulate` 添加了 `status_overlay` 开关与 `status_overlay_text` 只读缓冲，
 再通过 `MujocoQuickItem::statusOverlayVisible` / `statusOverlayText` 属性暴露给 QML。
 
-[补丁请查看 `patches/status-overlay.patch`](patches/status-overlay.patch)，共 4 处改动
+[补丁请查看 `patches/status-overlay.patch`](patches/status-overlay.patch)，共 6 处改动（`simulate.cc` 4 处、`simulate.h` 2 处）
 
 ### 升级步骤
 
+两个补丁都作用于 `simulate/simulate.cc`（其中 `status-overlay.patch` 还会改
+`simulate/simulate.h`）。补丁路径里写死的是旧版本目录
+（`mujoco-3.8.0-windows-x86_64/...`），所以 `git apply --directory=...` **不适用**——
+应把版本前缀改写进临时副本后，在仓库根目录应用：
+
 1. 将新版 `mujoco-X.Y.Z-windows-x86_64/` 目录放到本仓库同级目录，更新 `src/QMuJoCoScene.pri` 中的 `MUJOCO_DIR`。
-2. 在新版 `simulate/` 目录下执行：
+2. 在仓库根目录执行（把 `X.Y.Z` 换成实际新版本号）：
    ```bash
-   git apply --directory=mujoco-X.Y.Z-windows-x86_64 patches/status-overlay.patch
+   sed 's/mujoco-3\.8\.0-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
+       patches/status-overlay.patch        > /tmp/status-overlay.patch
+   sed 's/mujoco-3\.8\.0-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
+       patches/user-scn-managed-mode.patch > /tmp/user-scn-managed-mode.patch
+
+   git apply /tmp/status-overlay.patch
+   git apply /tmp/user-scn-managed-mode.patch
    ```
-   若补丁因上下文偏移无法自动应用，请手动合并，改动点共 **4 处**：
+   若跨大版本导致上下文偏移、补丁无法自动应用，请按下面的改动点手动合并。
+
+3. `patches/status-overlay.patch`，共 **6 处改动**（`simulate.cc` 4 处、`simulate.h` 2 处）：
    - `simulate.h`：在 `pause_update` 下方加 `status_overlay` 字段；在 `load_error` 下方加 `status_overlay_text` 字段。
    - `simulate.cc`：在 `zoom_increment` 之后加 `UpdateStatusOverlayText()` 函数；在 `Render()` 开头调用它；将两处绘制 overlay 的代码改为受 `status_overlay` 开关控制。
+
+4. `patches/user-scn-managed-mode.patch`，共 **1 处改动**：
+   - `simulate.cc` 的 `Sync()`：在非 passive 分支（`if (!is_passive_)`）里 `mjv_updateScene(...)`
+     之后，追加把 `user_scn` 的几何体并入 `scn`、并同步其渲染 flag 的代码（与 passive
+     分支已有的原生逻辑一致），使 managed 模式下经 `Simulate::user_scn` 注入的纯可视
+     图元能被渲染。

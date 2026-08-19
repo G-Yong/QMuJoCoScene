@@ -16,7 +16,7 @@ SOURCES += \
 QT *= core gui qml quick
 
 
-MUJOCO_DIR = $$PWD/../mujoco-3.8.0-windows-x86_64
+MUJOCO_DIR = $$PWD/../mujoco-3.8.1-windows-x86_64
 message("Using MuJoCo at: $$MUJOCO_DIR")
 
 INCLUDEPATH += $$MUJOCO_DIR/include
