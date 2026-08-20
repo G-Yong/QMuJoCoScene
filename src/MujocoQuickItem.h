@@ -607,6 +607,13 @@ public:
     void withSimulation(std::function<void(const mjModel*, mjData*)> callback) const;
     void withMutableSimulation(std::function<void(mjModel*, mjData*)> callback);
 
+    // 判断当前仿真是否已"停稳"：所有关节速度趋零，且被驱动关节的 qpos 已收敛到
+    // ctrl 目标（position 伺服的目标位）。用于脚本停止后等待机械臂追到最终位姿
+    // 再停仿真——伺服是目标位，物理要若干步才能追上，立刻停会差"一点点"。
+    // posTol 为被驱动关节位置误差容差（弧度，默认 1e-3）；velTol 为关节速度容差
+    // （弧度/秒，默认 1e-2）。场景未加载 / 无关节时返回 true（无物可等）。线程安全。
+    Q_INVOKABLE bool isSettled(double posTol = 1e-3, double velTol = 1e-2) const;
+
     // 给 Renderer 在 Quick 渲染线程读取的快照
     unsigned int currentSourceTexture() const;
     QSize        currentSourceSize() const;

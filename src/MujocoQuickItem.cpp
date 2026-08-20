@@ -370,6 +370,32 @@ void MujocoQuickItem::withMutableSimulation(std::function<void(mjModel*, mjData*
     requestRenderUpdate();
 }
 
+bool MujocoQuickItem::isSettled(double posTol, double velTol) const
+{
+    bool settled = true;
+    withSimulation([&](const mjModel* m, mjData* d) {
+        // 所有关节速度趋零
+        for (int i = 0; i < m->nv; ++i) {
+            if (std::abs(d->qvel[i]) > velTol) { settled = false; return; }
+        }
+        // 被驱动关节位置收敛到 ctrl 目标（position 伺服：ctrl = gear * qpos）
+        for (int a = 0; a < m->nu; ++a) {
+            if (m->actuator_trntype[a] != mjTRN_JOINT)
+                continue;
+            const int jid = m->actuator_trnid[2 * a];
+            if (jid < 0 || jid >= m->njnt)
+                continue;
+            const int type = m->jnt_type[jid];
+            if (type != mjJNT_HINGE && type != mjJNT_SLIDE)
+                continue;   // 只检查单自由度被驱动关节
+            const double target = d->ctrl[a];
+            const double cur = d->qpos[m->jnt_qposadr[jid]] * m->actuator_gear[6 * a];
+            if (std::abs(cur - target) > posTol) { settled = false; return; }
+        }
+    });
+    return settled;
+}
+
 void MujocoQuickItem::requestRenderUpdate() {
     if (QThread::currentThread() == thread()) {
         update();
