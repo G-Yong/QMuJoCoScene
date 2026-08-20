@@ -47,6 +47,9 @@ using Seconds = std::chrono::duration<double>;
 // MujocoQuickItem 成员函数实现）。
 using namespace mqi_detail;
 
+// 前向声明：锁内把控制值写穿到 d->ctrl（定义在文件后段）。
+static inline void applyControlImmediately(mujoco::Simulate& sim, int id, double value);
+
 // 缓入缓出函数（cubic ease-in-out），用于相机过渡。
 static float easeInOutCubic(float t) {
     return t < 0.5f ? 4.0f * t * t * t
@@ -543,6 +546,47 @@ bool MujocoQuickItem::resetSimulation() {
     withSimulateLocked([&](mujoco::Simulate& sim) {
         if (sim.is_passive_ || !sim.m_ || !sim.d_) return;
         sim.pending_.reset = true;
+        applied = true;
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::resetSimulationToState(const QVariantMap& jointValues,
+                                             const QVariantMap& controlValues) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (sim.is_passive_ || !sim.m_ || !sim.d_) return;
+
+        // 1) 全量物理复位（等价 resetSimulation 的 mj_resetData 语义）。
+        mj_resetData(sim.m_, sim.d_);
+        sim.scrub_index = 0;
+
+        // 2) 同步 Simulate 的 qpos/ctrl 影子缓存，避免下一次 Sync 用旧缓存回写。
+        resyncSimulateQposCaches(sim);
+        const int nu = static_cast<int>(sim.m_->nu);
+        for (int i = 0; i < nu; ++i)
+            applyControlImmediately(sim, i, sim.d_->ctrl[i]);
+
+        // 3) 覆盖指定关节的 qpos（按名，仅 hinge/slide）。
+        for (auto it = jointValues.cbegin(); it != jointValues.cend(); ++it) {
+            const int id = mj_name2id(sim.m_, mjOBJ_JOINT, it.key().toUtf8().constData());
+            if (!isValidIndex(id, static_cast<int>(sim.m_->njnt))) continue;
+            const int type = sim.m_->jnt_type[id];
+            if (type != mjJNT_SLIDE && type != mjJNT_HINGE) continue;
+            setHingeJointValue(sim.m_, sim.d_, sim.qpos_, sim.qpos_prev_, id,
+                               it.value().toDouble());
+        }
+
+        // 4) 覆盖指定执行器的 ctrl（按名），让位置伺服保持在目标姿态。
+        for (auto it = controlValues.cbegin(); it != controlValues.cend(); ++it) {
+            const int id = mj_name2id(sim.m_, mjOBJ_ACTUATOR, it.key().toUtf8().constData());
+            if (!isValidIndex(id, nu)) continue;
+            applyControlImmediately(sim, id, it.value().toDouble());
+        }
+
+        // 5) 前向运动学刷新世界位姿，标记 UI 重绘。
+        mj_forward(sim.m_, sim.d_);
+        markUiRefresh(sim);
         applied = true;
     });
     return applied;

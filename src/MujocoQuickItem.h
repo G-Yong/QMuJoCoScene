@@ -514,6 +514,13 @@ public:
     //   关节位置 → qpos0，关节速度 → 0，执行器/控制 → act0/0，
     //   外力 → 0，接触 → 清空，时间/能量 → 归零。
     Q_INVOKABLE bool resetSimulation();
+    // 复位到指定初始状态：先做与 resetSimulation() 等价的全量复位，随后在同一
+    // sim.mtx 锁内原子覆盖 jointValues 指定的关节 qpos（key=关节名，value=弧度）
+    // 与 controlValues 指定的执行器 ctrl（key=执行器名，value=控制量）。位置伺服
+    // 须同时给 qpos 与对应 ctrl 才能保持在该姿态，否则会被伺服拉回 0。空 map 时
+    // 等价于 resetSimulation()。
+    Q_INVOKABLE bool resetSimulationToState(const QVariantMap& jointValues,
+                                            const QVariantMap& controlValues = QVariantMap());
     Q_INVOKABLE bool zeroControls();
     Q_INVOKABLE bool setKeyframeIndex(int index);
     Q_INVOKABLE bool loadKeyframe();
