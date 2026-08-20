@@ -614,6 +614,17 @@ public:
     // （弧度/秒，默认 1e-2）。场景未加载 / 无关节时返回 true（无物可等）。线程安全。
     Q_INVOKABLE bool isSettled(double posTol = 1e-3, double velTol = 1e-2) const;
 
+    // 请求仿真在"停稳"后自动停止：脚本/手动停止时不要立即停仿真，而是保持运行，
+    // 待机械臂追到最终位姿（见 isSettled）再停——position 伺服 ctrl 是目标位，
+    // 物理需若干步才能追上，立刻停会差"一点点"。需连续保持 stableMs 毫秒才真正停；
+    // timeoutMs 为安全超时（被障碍卡住无法到位时兜底，0 表示不超时）。tolerances
+    // 含义同 isSettled。逐帧在渲染线程锁内判定，停稳后自动置 run=0 并发
+    // simulationRunningChanged。线程安全，可从任意线程调用；再次调用会重置计时。
+    Q_INVOKABLE void stopWhenSettled(double posTol = 5e-3, double velTol = 1e-2,
+                                     int stableMs = 150, int timeoutMs = 6000);
+    // 取消尚未完成的 stopWhenSettled 等待（不改变当前运行状态）。线程安全。
+    Q_INVOKABLE void cancelStopWhenSettled();
+
     // 给 Renderer 在 Quick 渲染线程读取的快照
     unsigned int currentSourceTexture() const;
     QSize        currentSourceSize() const;
@@ -704,6 +715,8 @@ private:
     void physicsThreadMain();
     void updateGeometryToAdapter();
     void requestRenderUpdate();
+    // isSettled 的无锁内核（调用方须已持 m_sim->mtx）。
+    static bool isSettledLocked(const mjModel* m, mjData* d, double posTol, double velTol);
     void applyBooleanPropertiesTo(mujoco::Simulate& sim);
     bool withSimulateLocked(const std::function<void(mujoco::Simulate&)>& callback);
     bool setVisualGroupVisible(unsigned char* groups, int group, bool visible);
@@ -748,6 +761,18 @@ private:
     std::atomic<bool> m_running {false};
 
     std::atomic<bool> m_simulationRunning {true};
+
+    // stopWhenSettled 等待状态（受 m_sim->mtx 保护，渲染线程每帧在 onFrameRendered 判定）
+    struct SettleStop {
+        bool   active    = false;
+        double posTol    = 5e-3;
+        double velTol    = 1e-2;
+        qint64 stableMs  = 150;
+        qint64 timeoutMs = 6000;
+        qint64 armMs     = 0;    // 起始等待时刻（单调毫秒）
+        qint64 settledMs = -1;   // 连续停稳的起始时刻，-1=当前未停稳
+    } m_settleStop;
+
     std::atomic<bool> m_helpVisible {false};
     std::atomic<bool> m_infoVisible {false};
     std::atomic<bool> m_profilerVisible {false};

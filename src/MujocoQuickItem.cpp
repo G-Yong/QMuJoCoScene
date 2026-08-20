@@ -370,30 +370,64 @@ void MujocoQuickItem::withMutableSimulation(std::function<void(mjModel*, mjData*
     requestRenderUpdate();
 }
 
+namespace {
+qint64 mqiNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+} // namespace
+
+bool MujocoQuickItem::isSettledLocked(const mjModel* m, mjData* d, double posTol, double velTol)
+{
+    // 所有关节速度趋零
+    for (int i = 0; i < m->nv; ++i)
+        if (std::abs(d->qvel[i]) > velTol) return false;
+    // 被驱动关节位置收敛到 ctrl 目标（position 伺服：ctrl = gear * qpos）
+    for (int a = 0; a < m->nu; ++a) {
+        if (m->actuator_trntype[a] != mjTRN_JOINT)
+            continue;
+        const int jid = m->actuator_trnid[2 * a];
+        if (jid < 0 || jid >= m->njnt)
+            continue;
+        const int type = m->jnt_type[jid];
+        if (type != mjJNT_HINGE && type != mjJNT_SLIDE)
+            continue;   // 只检查单自由度被驱动关节
+        const double target = d->ctrl[a];
+        const double cur = d->qpos[m->jnt_qposadr[jid]] * m->actuator_gear[6 * a];
+        if (std::abs(cur - target) > posTol) return false;
+    }
+    return true;
+}
+
 bool MujocoQuickItem::isSettled(double posTol, double velTol) const
 {
     bool settled = true;
     withSimulation([&](const mjModel* m, mjData* d) {
-        // 所有关节速度趋零
-        for (int i = 0; i < m->nv; ++i) {
-            if (std::abs(d->qvel[i]) > velTol) { settled = false; return; }
-        }
-        // 被驱动关节位置收敛到 ctrl 目标（position 伺服：ctrl = gear * qpos）
-        for (int a = 0; a < m->nu; ++a) {
-            if (m->actuator_trntype[a] != mjTRN_JOINT)
-                continue;
-            const int jid = m->actuator_trnid[2 * a];
-            if (jid < 0 || jid >= m->njnt)
-                continue;
-            const int type = m->jnt_type[jid];
-            if (type != mjJNT_HINGE && type != mjJNT_SLIDE)
-                continue;   // 只检查单自由度被驱动关节
-            const double target = d->ctrl[a];
-            const double cur = d->qpos[m->jnt_qposadr[jid]] * m->actuator_gear[6 * a];
-            if (std::abs(cur - target) > posTol) { settled = false; return; }
-        }
+        settled = isSettledLocked(m, d, posTol, velTol);
     });
     return settled;
+}
+
+void MujocoQuickItem::stopWhenSettled(double posTol, double velTol, int stableMs, int timeoutMs)
+{
+    if (!m_sim) return;
+    std::lock_guard<std::recursive_mutex> lk(m_sim->mtx);
+    if (m_sim->run == 0) return;   // 已停则无需等待
+    m_settleStop.active    = true;
+    m_settleStop.posTol    = posTol;
+    m_settleStop.velTol    = velTol;
+    m_settleStop.stableMs  = stableMs;
+    m_settleStop.timeoutMs = timeoutMs;
+    m_settleStop.armMs     = mqiNowMs();
+    m_settleStop.settledMs = -1;
+}
+
+void MujocoQuickItem::cancelStopWhenSettled()
+{
+    if (!m_sim) return;
+    std::lock_guard<std::recursive_mutex> lk(m_sim->mtx);
+    m_settleStop.active    = false;
+    m_settleStop.settledMs = -1;
 }
 
 void MujocoQuickItem::requestRenderUpdate() {
@@ -3314,6 +3348,28 @@ void MujocoQuickItem::onFrameRendered() {
         if (m_sim->m_ && m_sim->d_) {
             contacts = buildContactSnapshot(m_sim->m_, m_sim->d_);
             sampleTrackedTrajectoriesLocked(m_sim->m_, m_sim->d_);
+        }
+        // stopWhenSettled：等机械臂停稳（或安全超时）后自动停仿真
+        if (m_settleStop.active && m_sim->run != 0 && m_sim->m_ && m_sim->d_) {
+            const qint64 now = mqiNowMs();
+            bool stop = false;
+            if (isSettledLocked(m_sim->m_, m_sim->d_,
+                                m_settleStop.posTol, m_settleStop.velTol)) {
+                if (m_settleStop.settledMs < 0) m_settleStop.settledMs = now;
+                if (now - m_settleStop.settledMs >= m_settleStop.stableMs) stop = true;
+            } else {
+                m_settleStop.settledMs = -1;
+            }
+            // 被障碍卡住无法到位时兜底，避免一直空转
+            if (!stop && m_settleStop.timeoutMs > 0 &&
+                now - m_settleStop.armMs >= m_settleStop.timeoutMs) {
+                stop = true;
+            }
+            if (stop) {
+                m_settleStop.active = false;
+                m_sim->run = 0;
+                m_sim->pending_.ui_update_simulation = true;
+            }
         }
         // 键盘/UI 可能直接修改了 sim.run（例如空格键），同步回 m_simulationRunning
         const bool simRunning = (m_sim->run != 0);
