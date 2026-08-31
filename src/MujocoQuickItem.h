@@ -84,6 +84,10 @@ class MUJOCOQUICKITEM_EXPORT MujocoQuickItem : public QQuickFramebufferObject, p
     Q_PROPERTY(QString modelTitle READ modelTitle NOTIFY modelTitleChanged)
     Q_PROPERTY(QVariantList contacts READ contacts NOTIFY contactsChanged)
     Q_PROPERTY(int cameraTransitionDuration READ cameraTransitionDuration WRITE setCameraTransitionDuration NOTIFY cameraTransitionDurationChanged)
+    // 仿真回放（历史滚动缓冲）：见 seekHistory() / historyScrubIndex。
+    Q_PROPERTY(int historyCapacity READ historyCapacity NOTIFY historyCapacityChanged)
+    Q_PROPERTY(int historyDepth READ historyDepth NOTIFY historyDepthChanged)
+    Q_PROPERTY(int historyScrubIndex READ historyScrubIndex NOTIFY historyScrubIndexChanged)
 public:
     enum PrimitiveType {
         PrimitiveBox = 0,
@@ -509,6 +513,12 @@ public:
     Q_INVOKABLE bool stepSimulationForward();
     Q_INVOKABLE bool stepSimulationBackward();
 
+    // 仿真回放：跳转到历史缓冲中的某个回放位置。
+    //   scrubIndex：0=最新(实时)，负值=向历史回退的步数；范围 [-historyDepth, 0]，
+    //   越界自动夹取。调用会暂停仿真（若正在运行）。返回是否成功应用。
+    //   随后调用 setSimulationRunning(true)（点击“播放”）会把回放位置复位到最新点继续仿真。
+    Q_INVOKABLE bool seekHistory(int scrubIndex);
+
 
     // 全量物理复位（mj_resetData + mj_forward）：
     //   关节位置 → qpos0，关节速度 → 0，执行器/控制 → act0/0，
@@ -663,6 +673,11 @@ public:
     QString statusOverlayText() const { return m_statusOverlayText; }
     QString modelTitle() const { return m_modelTitle; }
 
+    // 仿真回放（历史缓冲）读取接口——值由 onFrameRendered 每帧同步、变化时发信号。
+    int historyCapacity() const { return m_historyCapacity; }       // 最多可回退的快照步数 (= nhistory-1)
+    int historyDepth() const { return m_historyDepth.load(); }      // 当前已记录、可回退的步数 (0..historyCapacity)
+    int historyScrubIndex() const { return m_historyScrubIndex; }   // 当前回放位置：0=最新，负=回退步数
+
     Q_INVOKABLE void setHelpVisible(bool visible);
     Q_INVOKABLE void setInfoVisible(bool visible);
     Q_INVOKABLE void setProfilerVisible(bool visible);
@@ -695,6 +710,10 @@ signals:
     // 当前接触快照发生实际变动时发出。
     void contactsChanged();
     void cameraTransitionDurationChanged();
+    // 仿真回放状态变化通知
+    void historyCapacityChanged();
+    void historyDepthChanged();
+    void historyScrubIndexChanged();
     // 场景区域被鼠标按下时发出（任意键）。
     void mousePressed();
 
@@ -720,6 +739,8 @@ protected:
 private:
     void renderThreadMain();
     void physicsThreadMain();
+    // 在持有 m_sim->mtx 前提下：记录一帧历史快照后，把可回退深度 +1（上限 nhistory-1）。
+    void bumpHistoryDepth(const mujoco::Simulate& sim);
     void updateGeometryToAdapter();
     void requestRenderUpdate();
     // isSettled 的无锁内核（调用方须已持 m_sim->mtx）。
@@ -794,6 +815,18 @@ private:
 
     QString           m_statusOverlayText;
     QString           m_modelTitle;
+
+    // 仿真回放（历史滚动缓冲）状态：
+    //   m_historyDepth        —— 已记录、可回退的快照步数（物理线程写、多线程读，原子）。
+    //   m_historyCapacity     —— nhistory-1，最多可回退步数（GUI 线程缓存，onFrameRendered 同步）。
+    //   m_historyScrubIndex   —— 当前回放位置缓存（GUI 线程缓存，onFrameRendered 同步）。
+    //   m_historyDepthEmitted —— historyDepthChanged 去抖用的上次发射值（GUI 线程）。
+    // 深度只在明确的复位/加载点清零（resetSimulation / resetSimulationToState / 场景加载），
+    // 不用 d->time 回退判定——回放会倒带 time（mjSTATE_INTEGRATION 含 mjSTATE_TIME）。
+    std::atomic<int>  m_historyDepth {0};
+    int               m_historyCapacity = 0;
+    int               m_historyScrubIndex = 0;
+    int               m_historyDepthEmitted = 0;
 
     std::mutex        m_pendingMtx;
     QString           m_pendingFile;

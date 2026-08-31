@@ -519,6 +519,7 @@ bool MujocoQuickItem::stepSimulationForward() {
         } else {
             mj_step(sim.m_, sim.d_);
             sim.AddToHistory();
+            bumpHistoryDepth(sim);
         }
         applied = true;
     });
@@ -530,7 +531,9 @@ bool MujocoQuickItem::stepSimulationBackward() {
     withSimulateLocked([&](mujoco::Simulate& sim) {
         if (sim.is_passive_ || !sim.m_) return;
         sim.run = 0;
-        sim.scrub_index = mjMAX(sim.scrub_index - 1, 1 - sim.nhistory_);
+        // 硬件下界 1-nhistory_，同时不得回退到尚未记录的区间（-historyDepth）。
+        const int lower = mjMAX(1 - sim.nhistory_, -m_historyDepth.load());
+        sim.scrub_index = mjMAX(sim.scrub_index - 1, lower);
         sim.pending_.load_from_history = true;
         sim.pending_.ui_update_simulation = true;
         applied = true;
@@ -541,11 +544,40 @@ bool MujocoQuickItem::stepSimulationBackward() {
     return applied;
 }
 
+bool MujocoQuickItem::seekHistory(int scrubIndex) {
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (sim.is_passive_ || !sim.m_) return;
+        // 夹取到 [lower, 0]：lower 取硬件下界与已记录深度中更靠近 0 的一侧。
+        const int lower = mjMAX(1 - sim.nhistory_, -m_historyDepth.load());
+        int idx = scrubIndex;
+        if (idx > 0)     idx = 0;
+        if (idx < lower) idx = lower;
+        sim.run = 0;
+        sim.scrub_index = idx;
+        sim.pending_.load_from_history = true;
+        sim.pending_.ui_update_simulation = true;
+        applied = true;
+    });
+    if (applied && m_simulationRunning.exchange(false)) {
+        emit simulationRunningChanged();
+    }
+    return applied;
+}
+
+void MujocoQuickItem::bumpHistoryDepth(const mujoco::Simulate& sim) {
+    const int cap = sim.nhistory_ > 0 ? sim.nhistory_ - 1 : 0;
+    const int d = m_historyDepth.load();
+    if (d < cap) m_historyDepth.store(d + 1);
+}
+
 bool MujocoQuickItem::resetSimulation() {
     bool applied = false;
     withSimulateLocked([&](mujoco::Simulate& sim) {
         if (sim.is_passive_ || !sim.m_ || !sim.d_) return;
         sim.pending_.reset = true;
+        sim.scrub_index = 0;
+        m_historyDepth.store(0);
         applied = true;
     });
     return applied;
@@ -560,6 +592,7 @@ bool MujocoQuickItem::resetSimulationToState(const QVariantMap& jointValues,
         // 1) 全量物理复位（等价 resetSimulation 的 mj_resetData 语义）。
         mj_resetData(sim.m_, sim.d_);
         sim.scrub_index = 0;
+        m_historyDepth.store(0);
 
         // 2) 同步 Simulate 的 qpos/ctrl 影子缓存，避免下一次 Sync 用旧缓存回写。
         resyncSimulateQposCaches(sim);
@@ -3387,11 +3420,17 @@ void MujocoQuickItem::onFrameRendered() {
     // 在锁内采样当前帧接触信息（sim.mtx 是 recursive_mutex，渲染线程可能已持锁）
     QList<ContactInfo> contacts;
     bool simRunChanged = false;
+    int  histScrub = m_historyScrubIndex;
+    int  histCap   = m_historyCapacity;
     if (m_sim) {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
         if (m_sim->m_ && m_sim->d_) {
             contacts = buildContactSnapshot(m_sim->m_, m_sim->d_);
             sampleTrackedTrajectoriesLocked(m_sim->m_, m_sim->d_);
+        }
+        if (m_sim->m_) {
+            histScrub = m_sim->scrub_index;
+            histCap   = m_sim->nhistory_ > 0 ? m_sim->nhistory_ - 1 : 0;
         }
         // stopWhenSettled：等机械臂停稳（或安全超时）后自动停仿真
         if (m_settleStop.active && m_sim->run != 0 && m_sim->m_ && m_sim->d_) {
@@ -3425,8 +3464,12 @@ void MujocoQuickItem::onFrameRendered() {
         applyCameraTransitionLocked(*m_sim);
     }
 
-    QMetaObject::invokeMethod(this, [this, statusText, contacts = std::move(contacts), simRunChanged] {
+    QMetaObject::invokeMethod(this, [this, statusText, contacts = std::move(contacts), simRunChanged, histScrub, histCap] {
         if (simRunChanged) emit simulationRunningChanged();
+        if (m_historyCapacity != histCap) { m_historyCapacity = histCap; emit historyCapacityChanged(); }
+        if (m_historyScrubIndex != histScrub) { m_historyScrubIndex = histScrub; emit historyScrubIndexChanged(); }
+        const int depthNow = m_historyDepth.load();
+        if (m_historyDepthEmitted != depthNow) { m_historyDepthEmitted = depthNow; emit historyDepthChanged(); }
         if (m_statusOverlayText != statusText) {
             m_statusOverlayText = statusText;
             emit statusOverlayTextChanged();
@@ -3722,6 +3765,7 @@ void MujocoQuickItem::physicsThreadMain() {
             mjData*  dnew = mnew ? mj_makeData(mnew) : nullptr;
             if (dnew) {
                 sim.Load(mnew, dnew, file.toLocal8Bit().constData());
+                m_historyDepth.store(0);   // 新模型：history 缓冲已重建，回退深度归零
                 std::unique_lock<std::recursive_mutex> lk(sim.mtx);
                 if (d) mj_deleteData(d);
                 if (m) mj_deleteModel(m);
@@ -3753,6 +3797,7 @@ void MujocoQuickItem::physicsThreadMain() {
             mjData*  dnew = mnew ? mj_makeData(mnew) : nullptr;
             if (dnew) {
                 sim.Load(mnew, dnew, sim.filename);
+                m_historyDepth.store(0);   // 新模型：history 缓冲已重建，回退深度归零
                 std::unique_lock<std::recursive_mutex> lk(sim.mtx);
                 if (d) mj_deleteData(d);
                 if (m) mj_deleteModel(m);
@@ -3797,6 +3842,7 @@ void MujocoQuickItem::physicsThreadMain() {
                 sim.InjectNoise(sim.key);
                 mj_step(m, d);
                 sim.AddToHistory();
+                bumpHistoryDepth(sim);
             } else {
                 mjtNum prevSim = d->time;
                 double refreshTime = simRefreshFraction / sim.refresh_rate;
@@ -3807,6 +3853,7 @@ void MujocoQuickItem::physicsThreadMain() {
                     if (d->time < prevSim) break;
                 }
                 sim.AddToHistory();
+                bumpHistoryDepth(sim);
             }
         } else {
             mj_forward(m, d);

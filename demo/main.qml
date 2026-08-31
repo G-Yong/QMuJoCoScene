@@ -147,6 +147,40 @@ Item {
                 }
 
                 PanelSection {
+                    title: "回放"
+                    Text {
+                        width: parent.width
+                        wrapMode: Text.WordWrap
+                        color: "#c7d2dc"
+                        font.pixelSize: 11
+                        text: "拖动滑条回放历史仿真（自动暂停）。右端=最新，向左回退；点击运行从最新点继续。"
+                    }
+                    PanelSlider {
+                        id: historySlider
+                        from: -mujoco.historyDepth
+                        to: 0
+                        value: mujoco.historyScrubIndex
+                        enabled: mujoco.historyDepth > 0
+                        onMoved: function(v) { mujoco.seekHistory(Math.round(v)) }
+                        onReleased: root.refocusMujoco()
+                    }
+                    Text {
+                        width: parent.width
+                        color: "#f0f3f6"
+                        font.pixelSize: 12
+                        text: "位置 " + mujoco.historyScrubIndex
+                              + " / 深度 " + mujoco.historyDepth
+                              + " / 容量 " + mujoco.historyCapacity
+                    }
+                    Row {
+                        width: parent.width
+                        spacing: 6
+                        PanelButton { width: (parent.width - 6) / 2; label: "回到最新"; onClicked: { mujoco.seekHistory(0); root.refocusMujoco() } }
+                        PanelButton { width: (parent.width - 6) / 2; label: "运行"; onClicked: { mujoco.setSimulationRunning(true); root.refocusMujoco() } }
+                    }
+                }
+
+                PanelSection {
                     title: "相机"
                     Row {
                         width: parent.width
@@ -344,6 +378,64 @@ Item {
                 toggle.checked = !toggle.checked
                 toggle.toggled(toggle.checked)
             }
+        }
+    }
+
+    // 简易水平滑条（纯 QtQuick，无需 QtQuick.Controls）：
+    //   value 在 [from, to] 间取值；拖动/点击时持续发 moved(value)。
+    component PanelSlider: Item {
+        id: slider
+        property real from: 0
+        property real to: 1
+        property real value: 0
+        signal moved(real value)
+        signal released()
+        width: parent ? parent.width : 260
+        height: 30
+
+        readonly property real _span: (to - from) > 0 ? (to - from) : 1
+        readonly property real _t: Math.max(0, Math.min(1, (value - from) / _span))
+
+        Rectangle {
+            id: track
+            anchors.verticalCenter: parent.verticalCenter
+            x: 6
+            width: parent.width - 12
+            height: 6
+            radius: 3
+            color: "#2a333c"
+            border.color: "#465563"
+
+            Rectangle {
+                height: parent.height
+                radius: 3
+                width: parent.width * slider._t
+                color: slider.enabled ? "#5bb6e6" : "#53606b"
+            }
+        }
+
+        Rectangle {
+            id: handle
+            width: 14
+            height: 14
+            radius: 7
+            y: (parent.height - height) / 2
+            x: track.x + track.width * slider._t - width / 2
+            color: slider.enabled ? "#f7fafc" : "#9aa6b0"
+            border.color: "#465563"
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            enabled: slider.enabled
+            preventStealing: true
+            function pick(mx) {
+                var t = Math.max(0, Math.min(1, (mx - track.x) / track.width))
+                slider.moved(slider.from + t * slider._span)
+            }
+            onPressed: pick(mouse.x)
+            onPositionChanged: if (pressed) pick(mouse.x)
+            onReleased: slider.released()
         }
     }
 }
