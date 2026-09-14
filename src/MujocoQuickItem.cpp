@@ -1035,10 +1035,11 @@ void MujocoQuickItem::rebuildTrajectoryGeomsLocked() {
         const float color[4] = {t.rgba.x(), t.rgba.y(), t.rgba.z(), t.rgba.w()};
         for (size_t i = 1; i < t.points.size(); ++i) {
             if (g >= maxg) break;
+            if (t.points[i].gapBefore) continue;  // 抬笔：本段不连线
             mjvGeom* geom = &m_userScene->geoms[g];
             mjv_initGeom(geom, geomType, nullptr, nullptr, nullptr, color);
-            mjtNum from[3] = { t.points[i-1].x(), t.points[i-1].y(), t.points[i-1].z() };
-            mjtNum to[3]   = { t.points[i].x(),   t.points[i].y(),   t.points[i].z()   };
+            mjtNum from[3] = { t.points[i-1].pos.x(), t.points[i-1].pos.y(), t.points[i-1].pos.z() };
+            mjtNum to[3]   = { t.points[i].pos.x(),   t.points[i].pos.y(),   t.points[i].pos.z()   };
             mjv_connector(geom, geomType, t.width, from, to);
             ++g;
         }
@@ -1381,12 +1382,13 @@ void MujocoQuickItem::sampleTrackedTrajectoriesLocked(const mjModel* m, const mj
         // rebuildTrajectoryGeomsLocked()，引起不必要的 user_scn 重建，
         // 与 Qt Quick / mujoco 渲染线程的帧节拍互相挤压导致掉到 ~30fps。
         if (!t.points.empty()) {
-            const QVector3D& last = t.points.back();
+            const QVector3D& last = t.points.back().pos;
             const float dist = (p - last).length();
             const float minDist = std::max(float(t.minDistance), 1e-6f);
             if (dist < minDist) continue;
         }
-        t.points.push_back(p);
+        t.points.push_back({p, t.pendingGap});
+        t.pendingGap = false;
         while (static_cast<int>(t.points.size()) > t.maxPoints) t.points.pop_front();
         anyChange = true;
     }
@@ -1453,10 +1455,22 @@ bool MujocoQuickItem::appendTrajectoryPoint(int trajectoryId, const QVector3D& p
     withSimulateLocked([&](mujoco::Simulate& sim) {
         TrajectoryState* t = findTrajectory(trajectoryId);
         if (!t) return;
-        t->points.push_back(point);
+        t->points.push_back({point, t->pendingGap});
+        t->pendingGap = false;
         while (static_cast<int>(t->points.size()) > t->maxPoints) t->points.pop_front();
         rebuildTrajectoryGeomsLocked();
         markUiRefresh(sim);
+        ok = true;
+    });
+    return ok;
+}
+
+bool MujocoQuickItem::breakTrajectory(int trajectoryId) {
+    bool ok = false;
+    withSimulateLocked([&](mujoco::Simulate&) {
+        TrajectoryState* t = findTrajectory(trajectoryId);
+        if (!t) return;
+        t->pendingGap = true;
         ok = true;
     });
     return ok;
@@ -1472,6 +1486,7 @@ bool MujocoQuickItem::clearTrajectoryPoints(int trajectoryId) {
             rebuildTrajectoryGeomsLocked();
             markUiRefresh(sim);
         }
+        t->pendingGap = false;
         ok = true;
     });
     return ok;

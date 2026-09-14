@@ -234,6 +234,9 @@ public:
     Q_INVOKABLE void clearTrajectories();
     // 向指定轨迹追加一个采样点（世界坐标）。
     Q_INVOKABLE bool appendTrajectoryPoint(int trajectoryId, const QVector3D& point);
+    // 抬笔：使该轨迹下一个入队的点与上一个点断开（不连线）。用于把工艺开→关
+    // 之间的移动段与随后的新工艺段分隔，避免跨段假连线。
+    Q_INVOKABLE bool breakTrajectory(int trajectoryId);
     // 清空指定轨迹的点位，但保留轨迹本体（仍可继续 append / 跟踪）。
     Q_INVOKABLE bool clearTrajectoryPoints(int trajectoryId);
     Q_INVOKABLE int  trajectoryCount() const;
@@ -880,7 +883,15 @@ private:
         int       trackedSiteId = -1;
         QString   trackedSiteName;
         double    minDistance = 0.0;
-        std::deque<QVector3D> points;
+        // 每个采样点携带一个“抬笔”标记：gapBefore==true 表示不与上一个点连线，
+        // 用于把非连续的采样段（如工艺开→关之间的移动）断开，避免跨段的假连线。
+        struct TrajPoint {
+            QVector3D pos;
+            bool      gapBefore = false;
+        };
+        std::deque<TrajPoint> points;
+        // 待处理的抬笔标记：下一个入队的点会被标为 gapBefore，随后清除。
+        bool      pendingGap = false;
     };
 
     int                          m_staticVisualGeomCount = 0;
