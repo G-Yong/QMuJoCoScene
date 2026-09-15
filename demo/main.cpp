@@ -212,8 +212,8 @@ int main(int argc, char *argv[])
     view->setResizeMode(QQuickWidget::SizeRootObjectToView);
     // 默认模型路径 —— 改成你自己的路径
     QString filePath;
-    // filePath = "../../../../mujoco-3.8.0-windows-x86_64/model/humanoid/humanoid.xml";
-    // filePath = "../../../../mujoco-3.8.0-windows-x86_64/model/cards/cards.xml";
+    // filePath = "../../../../mujoco-3.8.1-windows-x86_64/model/humanoid/humanoid.xml";
+    // filePath = "../../../../mujoco-3.8.1-windows-x86_64/model/cards/cards.xml";
     filePath = "../../../model/slide.xml";
     view->engine()->rootContext()->setContextProperty(
         "initialXmlPath",

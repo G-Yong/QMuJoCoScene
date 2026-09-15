@@ -1,7 +1,7 @@
-diff --git a/mujoco-3.8.0-windows-x86_64/simulate/simulate.cc b/mujoco-3.8.0-windows-x86_64/simulate/simulate.cc
-index b4e29e3..99e4c03 100644
---- a/mujoco-3.8.0-windows-x86_64/simulate/simulate.cc
-+++ b/mujoco-3.8.0-windows-x86_64/simulate/simulate.cc
+diff --git a/mujoco-3.8.1-windows-x86_64/simulate/simulate.cc b/mujoco-3.8.1-windows-x86_64/simulate/simulate.cc
+index 58643a1..f88502e 100644
+--- a/mujoco-3.8.1-windows-x86_64/simulate/simulate.cc
++++ b/mujoco-3.8.1-windows-x86_64/simulate/simulate.cc
 @@ -96,6 +96,20 @@ inline void Copy(T& dst, const T& src) {
  
  const double zoom_increment = 0.02;  // ratio of one click-wheel zoom increment to vertical extent
@@ -23,7 +23,7 @@ index b4e29e3..99e4c03 100644
  // section ids
  enum {
    // left ui
-@@ -2617,6 +2631,7 @@ void Simulate::Render() {
+@@ -2644,6 +2658,7 @@ void Simulate::Render() {
    if (this->profiler) {
      smallrect.width = rect.width - rect.width/4;
    }
@@ -31,7 +31,7 @@ index b4e29e3..99e4c03 100644
  
    // no model
    if (!this->is_passive_ && !this->m_) {
-@@ -2625,8 +2640,10 @@ void Simulate::Render() {
+@@ -2652,8 +2667,10 @@ void Simulate::Render() {
  
      // label
      if (this->loadrequest) {
@@ -44,7 +44,7 @@ index b4e29e3..99e4c03 100644
      } else {
        char intro_message[Simulate::kMaxFilenameLength];
        mju::sprintf_arr(intro_message,
-@@ -2754,16 +2771,8 @@ void Simulate::Render() {
+@@ -2781,16 +2798,8 @@ void Simulate::Render() {
    }
  
    // show pause/loading label
@@ -63,10 +63,10 @@ index b4e29e3..99e4c03 100644
                  &this->platform_ui->mjr_context());
    }
  
-diff --git a/mujoco-3.8.0-windows-x86_64/simulate/simulate.h b/mujoco-3.8.0-windows-x86_64/simulate/simulate.h
+diff --git a/mujoco-3.8.1-windows-x86_64/simulate/simulate.h b/mujoco-3.8.1-windows-x86_64/simulate/simulate.h
 index 27727ee..037cf09 100644
---- a/mujoco-3.8.0-windows-x86_64/simulate/simulate.h
-+++ b/mujoco-3.8.0-windows-x86_64/simulate/simulate.h
+--- a/mujoco-3.8.1-windows-x86_64/simulate/simulate.h
++++ b/mujoco-3.8.1-windows-x86_64/simulate/simulate.h
 @@ -192,6 +192,7 @@ class Simulate {
    int profiler = 0;
    int sensor = 0;

@@ -69,7 +69,7 @@ Qt Main Thread
 | Component | Version |
 |---|---|
 | Qt | 5.15.2 (requires `quick` and `opengl` modules) |
-| MuJoCo | 3.8.0 Windows x86_64 |
+| MuJoCo | 3.8.1 Windows x86_64 |
 | Compiler | MSVC 2019 64-bit (`/utf-8`) |
 | OpenGL | 3.3 Compatibility Profile |
 
@@ -175,16 +175,16 @@ were added to `Simulate`, then exposed to QML through the
 ### Upgrade Steps
 
 Both patches touch `simulate/simulate.cc` (and `status-overlay.patch` also modifies
-`simulate/simulate.h`). Their paths embed the old version directory
-(`mujoco-3.8.0-windows-x86_64/...`), so `git apply --directory=...` does **not** work —
+`simulate/simulate.h`). Their paths embed the currently vendored version directory
+(`mujoco-3.8.1-windows-x86_64/...`), so `git apply --directory=...` does **not** work —
 rewrite the version prefix into temporary copies and apply from the repository root:
 
 1. Place the new `mujoco-X.Y.Z-windows-x86_64/` directory alongside this repository and update `MUJOCO_DIR` in `src/QMuJoCoScene.pri`.
 2. From the repository root, run (replace `X.Y.Z` with the actual new version):
    ```bash
-   sed 's/mujoco-3\.8\.0-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
+   sed 's/mujoco-3\.8\.1-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
        patches/status-overlay.patch        > /tmp/status-overlay.patch
-   sed 's/mujoco-3\.8\.0-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
+   sed 's/mujoco-3\.8\.1-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
        patches/user-scn-managed-mode.patch > /tmp/user-scn-managed-mode.patch
 
    git apply /tmp/status-overlay.patch

@@ -69,7 +69,7 @@ Qt 主线程
 | 组件 | 版本 |
 |---|---|
 | Qt | 5.15.2（需含 `quick`、`opengl` 模块）|
-| MuJoCo | 3.8.0 Windows x86_64 |
+| MuJoCo | 3.8.1 Windows x86_64 |
 | 编译器 | MSVC 2019 64-bit（`/utf-8`）|
 | OpenGL | 3.3 Compatibility Profile |
 
@@ -172,16 +172,16 @@ MuJoCo 官方提供了丰富的示例模型，可在 [MuJoCo 模型库](https://
 ### 升级步骤
 
 两个补丁都作用于 `simulate/simulate.cc`（其中 `status-overlay.patch` 还会改
-`simulate/simulate.h`）。补丁路径里写死的是旧版本目录
-（`mujoco-3.8.0-windows-x86_64/...`），所以 `git apply --directory=...` **不适用**——
+`simulate/simulate.h`）。补丁路径里写死的是当前 vendored 版本目录
+（`mujoco-3.8.1-windows-x86_64/...`），所以 `git apply --directory=...` **不适用**——
 应把版本前缀改写进临时副本后，在仓库根目录应用：
 
 1. 将新版 `mujoco-X.Y.Z-windows-x86_64/` 目录放到本仓库同级目录，更新 `src/QMuJoCoScene.pri` 中的 `MUJOCO_DIR`。
 2. 在仓库根目录执行（把 `X.Y.Z` 换成实际新版本号）：
    ```bash
-   sed 's/mujoco-3\.8\.0-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
+   sed 's/mujoco-3\.8\.1-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
        patches/status-overlay.patch        > /tmp/status-overlay.patch
-   sed 's/mujoco-3\.8\.0-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
+   sed 's/mujoco-3\.8\.1-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
        patches/user-scn-managed-mode.patch > /tmp/user-scn-managed-mode.patch
 
    git apply /tmp/status-overlay.patch
