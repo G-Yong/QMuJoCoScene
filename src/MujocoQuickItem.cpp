@@ -463,7 +463,7 @@ void MujocoQuickItem::stopWhenSettled(double posTol, double velTol, int stableMs
     m_settleStop.velTol    = velTol;
     m_settleStop.stableMs  = stableMs;
     m_settleStop.timeoutMs = timeoutMs;
-    m_settleStop.armMs     = mqiNowMs();
+    m_settleStop.armMs     = static_cast<qint64>(m_simSeconds.load() * 1000.0);
     m_settleStop.settledMs = -1;
 }
 
@@ -3492,7 +3492,8 @@ void MujocoQuickItem::onFrameRendered() {
         }
         // stopWhenSettled：等机械臂停稳（或安全超时）后自动停仿真
         if (m_settleStop.active && m_sim->run != 0 && m_sim->m_ && m_sim->d_) {
-            const qint64 now = mqiNowMs();
+            // 窗口用仿真时间：stableMs/timeoutMs 表示仿真毫秒（不随构建/机器速度变化）
+            const qint64 now = static_cast<qint64>(m_simSeconds.load() * 1000.0);
             bool stop = false;
             if (isSettledLocked(m_sim->m_, m_sim->d_,
                                 m_settleStop.posTol, m_settleStop.velTol)) {

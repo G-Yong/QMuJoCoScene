@@ -659,7 +659,8 @@ public:
 
     // 请求仿真在"停稳"后自动停止：脚本/手动停止时不要立即停仿真，而是保持运行，
     // 待机械臂追到最终位姿（见 isSettled）再停——position 伺服 ctrl 是目标位，
-    // 物理需若干步才能追上，立刻停会差"一点点"。需连续保持 stableMs 毫秒才真正停；
+    // 物理需若干步才能追上，立刻停会差"一点点"。需连续保持 stableMs **仿真**毫秒
+    //（时间窗口取单调仿真时钟，见 2026-09-15 spec）才真正停；
     // timeoutMs 为安全超时（被障碍卡住无法到位时兜底，0 表示不超时）。tolerances
     // 含义同 isSettled。逐帧在渲染线程锁内判定，停稳后自动置 run=0 并发
     // simulationRunningChanged。线程安全，可从任意线程调用；再次调用会重置计时。
@@ -836,8 +837,8 @@ private:
         double velTol    = 1e-2;
         qint64 stableMs  = 150;
         qint64 timeoutMs = 6000;
-        qint64 armMs     = 0;    // 起始等待时刻（单调毫秒）
-        qint64 settledMs = -1;   // 连续停稳的起始时刻，-1=当前未停稳
+        qint64 armMs     = 0;    // 起始等待时刻（单调**仿真**毫秒）
+        qint64 settledMs = -1;   // 连续停稳的起始时刻（仿真毫秒），-1=当前未停稳
     } m_settleStop;
 
     std::atomic<bool> m_helpVisible {false};
