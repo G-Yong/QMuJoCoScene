@@ -41,6 +41,8 @@ constexpr double  syncMisalign       = 0.1;
 constexpr double  simRefreshFraction = 0.7;
 constexpr int     kErrorLength       = 1024;
 using Seconds = std::chrono::duration<double>;
+// ROBOTSIM_CLOCK_DEBUG=1 时，物理线程每 60 次循环打印一次单调仿真时钟（诊断用）
+const bool kSimClockDebug = qEnvironmentVariableIsSet("ROBOTSIM_CLOCK_DEBUG");
 } // namespace
 
 // 把辅助函数 / 结构暴露给本翻译单元（包括下面的 static 自由函数与
@@ -402,6 +404,46 @@ bool MujocoQuickItem::isSettledLocked(const mjModel* m, mjData* d, double posTol
     return true;
 }
 
+bool MujocoQuickItem::simulationClockActive() const {
+    if (!m_sim) return false;
+    std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+    return m_sim->m_ != nullptr && m_sim->run != 0;
+}
+
+bool MujocoQuickItem::waitUntilSimulationSeconds(double targetSeconds, int timeoutMs,
+                                                 const std::function<bool()> &abort)
+{
+    if (!m_sim) return true;   // 无仿真：当作已到达，调用方自然退化
+    const auto deadline = std::chrono::steady_clock::now()
+                        + std::chrono::milliseconds(timeoutMs > 0 ? timeoutMs : 0);
+    // 首次加锁最多等一个 burst；锁内只做原子读与 abort 检查，等待时释放锁
+    std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+    while (true) {
+        if (abort && abort())                                     return false;
+        if (m_simSeconds.load() >= targetSeconds)                  return true;
+        if (timeoutMs > 0 && std::chrono::steady_clock::now() >= deadline) return false;
+        // 20ms 只是给 abort() 一个有界响应；正常推进由物理线程 notify_all 唤醒
+        m_simClockCv.wait_for(lk, std::chrono::milliseconds(20));
+    }
+}
+
+QVariantList MujocoQuickItem::qposSnapshot() const {
+    QVariantList out;
+    if (!m_sim) return out;
+    std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+    if (!m_sim->m_ || !m_sim->d_) return out;
+    const int nq = m_sim->m_->nq;
+    out.reserve(nq);
+    for (int i = 0; i < nq; ++i) out.append(m_sim->d_->qpos[i]);
+    return out;
+}
+
+void MujocoQuickItem::noteSimStep(const mjModel* m) {
+    m_simSteps.fetch_add(1, std::memory_order_relaxed);
+    // 单写者（物理线程 / 单步按钮），load+store 足够，且不依赖 C++20 的原子浮点算术
+    m_simSeconds.store(m_simSeconds.load() + (m ? m->opt.timestep : 0.0));
+}
+
 bool MujocoQuickItem::isSettled(double posTol, double velTol) const
 {
     bool settled = true;
@@ -518,6 +560,7 @@ bool MujocoQuickItem::stepSimulationForward() {
             sim.pending_.ui_update_simulation = true;
         } else {
             mj_step(sim.m_, sim.d_);
+            noteSimStep(sim.m_);   // 保持时钟与物理同步（手动单步）
             sim.AddToHistory();
             bumpHistoryDepth(sim);
         }
@@ -3856,6 +3899,7 @@ void MujocoQuickItem::physicsThreadMain() {
                 sim.speed_changed = false;
                 sim.InjectNoise(sim.key);
                 mj_step(m, d);
+                noteSimStep(m);                 // 单调仿真时钟：+1 步
                 sim.AddToHistory();
                 bumpHistoryDepth(sim);
             } else {
@@ -3865,6 +3909,7 @@ void MujocoQuickItem::physicsThreadMain() {
                        Clock::now() - startCPU < Seconds(refreshTime)) {
                     sim.InjectNoise(sim.key);
                     mj_step(m, d);
+                    noteSimStep(m);             // 单调仿真时钟：+1 步
                     if (d->time < prevSim) break;
                 }
                 sim.AddToHistory();
@@ -3874,6 +3919,15 @@ void MujocoQuickItem::physicsThreadMain() {
             mj_forward(m, d);
             if (sim.pause_update) mju_copy(d->qacc_warmstart, d->qacc, m->nv);
             sim.speed_changed = true;
+        }
+        // 时钟推进了：唤醒在 waitUntilSimulationSeconds 上等待的线程（脚本线程）
+        if (sim.run) m_simClockCv.notify_all();
+        if (kSimClockDebug) {
+            static int tick = 0;
+            if ((++tick % 60) == 0)
+                qDebug() << "[sim-clock] steps" << m_simSteps.load()
+                         << "seconds" << m_simSeconds.load()
+                         << "active" << (sim.run != 0);
         }
     }
 

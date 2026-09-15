@@ -29,6 +29,8 @@
 #include <QQuaternion>
 #include <QtCore/qglobal.h>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -627,6 +629,27 @@ public:
     void withSimulation(std::function<void(const mjModel*, mjData*)> callback) const;
     void withMutableSimulation(std::function<void(mjModel*, mjData*)> callback);
 
+    // ------------------------------------------------------------------
+    // 仿真时钟（单调）——让脚本按仿真时间而不是墙钟推进
+    // 见 docs/superpowers/specs/2026-09-15-simulation-clock-design.md
+    // ------------------------------------------------------------------
+    // 单调仿真时间（秒）= Σ 每次 mj_step 当时的 opt.timestep。只增不减
+    //（回放 scrub / resetSimulation / 场景重载都不回退）。线程安全。
+    Q_INVOKABLE double simulationSeconds() const { return m_simSeconds.load(); }
+
+    // 时钟是否在推进：仿真处于运行状态且模型已加载。线程安全。
+    Q_INVOKABLE bool simulationClockActive() const;
+
+    // 阻塞当前线程直到仿真时间到达 targetSeconds，或 abort() 返回 true，或超时。
+    // 返回 true = 已到达；false = 超时/中止（调用方决定退化墙钟还是报错）。
+    // ⚠️ 只能在后台线程调用（不得在 GUI 线程调用）；内部自行加/放 sim.mtx，
+    //    因此调用方**不得**持锁，也不得在 withSimulation 回调里调用它。
+    bool waitUntilSimulationSeconds(double targetSeconds, int timeoutMs,
+                                    const std::function<bool()> &abort);
+
+    // 当前 qpos 快照（nq 个 double），一次性加锁读取。用于确定性指纹日志。
+    Q_INVOKABLE QVariantList qposSnapshot() const;
+
     // 判断当前仿真是否已"停稳"：所有关节速度趋零，且被驱动关节的 qpos 已收敛到
     // ctrl 目标（position 伺服的目标位）。用于脚本停止后等待机械臂追到最终位姿
     // 再停仿真——伺服是目标位，物理要若干步才能追上，立刻停会差"一点点"。
@@ -748,6 +771,8 @@ private:
     void requestRenderUpdate();
     // isSettled 的无锁内核（调用方须已持 m_sim->mtx）。
     static bool isSettledLocked(const mjModel* m, mjData* d, double posTol, double velTol);
+    // 记一步仿真：累加单调时钟。调用方通常已持 sim.mtx（burst 内 / 单步内）。
+    void noteSimStep(const mjModel* m);
     void applyBooleanPropertiesTo(mujoco::Simulate& sim);
     bool withSimulateLocked(const std::function<void(mujoco::Simulate&)>& callback);
     bool setVisualGroupVisible(unsigned char* groups, int group, bool visible);
@@ -792,6 +817,17 @@ private:
     std::atomic<bool> m_running {false};
 
     std::atomic<bool> m_simulationRunning {true};
+
+    // ── 仿真时钟（单调）──────────────────────────────────────────
+    //  m_simSteps   —— 每次 mj_step 之后 +1（物理线程 burst / stepSimulationForward）
+    //  m_simSeconds —— 每次步进累加当时的 opt.timestep
+    //  m_simClockCv —— 与 m_sim->mtx 配对的唤醒源：burst 结束、释放锁**之前** notify_all()。
+    //                  等待方必须用它精确唤醒，不要用 msleep 轮询（Windows 定时器粒度
+    //                  约 15.6ms，会把样本发晚 → 伺服多收敛 → 把墙钟抖动又引回来）。
+    // 两者只增不减；单写者 = 物理线程（以及 GUI 线程的单步），读写用原子即可。
+    std::atomic<qint64>         m_simSteps {0};
+    std::atomic<double>         m_simSeconds {0.0};
+    std::condition_variable_any m_simClockCv;
 
     // stopWhenSettled 等待状态（受 m_sim->mtx 保护，渲染线程每帧在 onFrameRendered 判定）
     struct SettleStop {
