@@ -27,6 +27,8 @@
 #include <QVector>
 #include <QVector4D>
 #include <QQuaternion>
+#include <QMatrix4x4>
+#include <QPointF>
 #include <QtCore/qglobal.h>
 #include <atomic>
 #include <chrono>
@@ -90,6 +92,11 @@ class MUJOCOQUICKITEM_EXPORT MujocoQuickItem : public QQuickFramebufferObject, p
     Q_PROPERTY(int historyCapacity READ historyCapacity NOTIFY historyCapacityChanged)
     Q_PROPERTY(int historyDepth READ historyDepth NOTIFY historyDepthChanged)
     Q_PROPERTY(int historyScrubIndex READ historyScrubIndex NOTIFY historyScrubIndexChanged)
+    // 拖动示教 gizmo（见文件末 GizmoState 说明）。
+    Q_PROPERTY(bool gizmoVisible READ gizmoVisible WRITE setGizmoVisible NOTIFY gizmoVisibleChanged)
+    Q_PROPERTY(bool gizmoDragging READ gizmoDragging NOTIFY gizmoDraggingChanged)
+    // gizmo 手柄对齐坐标系：false=世界坐标轴（默认），true=工具坐标系（跟随 TCP 姿态）。
+    Q_PROPERTY(bool gizmoToolAligned READ gizmoToolAligned WRITE setGizmoToolAligned NOTIFY gizmoToolAlignedChanged)
 public:
     enum PrimitiveType {
         PrimitiveBox = 0,
@@ -267,6 +274,29 @@ public:
     // 是分开的，objectInfo() 列出的 link1..link6 等是 body 名，不一定存在同名 site。
     // 用于配合 setTrajectoryTrackedSite 排查 / 选择 TCP。场景未加载时返回空列表。
     Q_INVOKABLE QStringList siteNames() const;
+
+    // ------------------------------------------------------------------
+    // 拖动示教 gizmo（6-DoF，仅在仿真停止时使用）
+    // ------------------------------------------------------------------
+    // 在 TCP（默认 site 名 "tcp"）上叠加一个 rviz 风格的 6 自由度交互 gizmo：
+    // 三根世界轴平移箭头 + 三个世界轴旋转环。拖动时按屏幕投影解算目标世界位姿
+    // 增量，通过 gizmoPoseEdited() 连续发出（位置单位：米；姿态：世界系四元数），
+    // 由上层用 IK 落到关节。gizmo 只画进 user_scn，不参与物理/存档；仿真开始
+    // 运行时自动隐藏。手柄始终与世界轴对齐、仅跟随 TCP 位置移动（rviz 交互标记
+    // 风格），姿态变化只体现在发出的位姿里。
+    bool gizmoVisible() const { return m_gizmo.visible; }
+    void setGizmoVisible(bool visible);
+    bool gizmoDragging() const { return m_gizmo.dragging; }
+    // 手柄对齐：false=世界轴（默认），true=工具坐标系（手柄随 TCP 姿态旋转）。
+    bool gizmoToolAligned() const { return m_gizmo.toolAligned; }
+    void setGizmoToolAligned(bool aligned);
+    // 设定 gizmo 跟踪的 site 名（默认 "tcp"）。
+    Q_INVOKABLE void setGizmoTrackedSite(const QString& siteName);
+    // gizmo 手柄的世界尺寸（米），影响箭头长度/环半径与命中判定。
+    Q_INVOKABLE void setGizmoSize(double worldSize);
+    // 上层在 gizmoPoseEdited() 槽内回调：报告刚给出的位姿 IK 是否可解。
+    // 不可解不会打断拖动（手柄始终跟手），只决定松手时 gizmo 回弹到哪。
+    Q_INVOKABLE void reportGizmoEditSolvable(bool solvable);
 
     // ------------------------------------------------------------------
     // 点云（point cloud）可视化接口
@@ -744,6 +774,13 @@ signals:
     // 场景区域被鼠标按下时发出（任意键）。
     void mousePressed();
 
+    // 拖动示教 gizmo 状态/事件
+    void gizmoVisibleChanged();
+    void gizmoDraggingChanged();
+    void gizmoToolAlignedChanged();
+    // 拖动 gizmo 时连续发出目标 TCP 世界位姿（位置单位：米；姿态：世界系四元数）。
+    void gizmoPoseEdited(const QVector3D& position, const QQuaternion& orientation);
+
     // 场景加载结果通知
     void sceneLoaded(const QString& source);
     void sceneLoadFailed(const QString& reason);
@@ -936,6 +973,34 @@ private:
     int                          m_nextTrajectoryId = 1;
 
     // ------------------------------------------------------------------
+    // 拖动示教 gizmo 状态（全部受 m_sim->mtx 保护：GUI 线程的鼠标处理与渲染
+    // 线程的 onFrameRendered 都会读写）。geom 段紧跟在轨迹段之后（tail），
+    // geomStart 在每次 rebuildTrajectoryGeomsLocked 末尾更新为轨迹段结束下标。
+    // handle 索引：0..2 = 平移 X/Y/Z 箭头；3..5 = 旋转 X/Y/Z 环。
+    // ------------------------------------------------------------------
+    struct GizmoState {
+        bool        visible = false;
+        QString     siteName = QStringLiteral("tcp");
+        int         siteId = -1;
+        bool        poseValid = false;
+        QVector3D   pos;                 // 世界位置（米）
+        QQuaternion ori;                 // 世界姿态
+        float       size = 0.12f;        // 手柄世界尺寸（米）
+        int         hovered = -1;
+        int         active = -1;
+        bool        dragging = false;
+        int         dragMode = 0;        // 0=平移 1=旋转
+        int         dragAxis = 0;        // 0=X 1=Y 2=Z
+        bool        toolAligned = false; // false=世界轴对齐，true=工具坐标系对齐
+        QPointF     lastMouse;
+        QVector3D   solvablePos;         // 最近一次 IK 可解的位姿
+        QQuaternion solvableOri;
+        bool        lastSolvable = true;
+        int         geomStart = 0;
+        int         geomCount = 0;
+    } m_gizmo;
+
+    // ------------------------------------------------------------------
     // 点云状态（GPU GL_POINTS 叠加层）
     // ------------------------------------------------------------------
     // CPU 侧存扁平 float 缓冲（positions xyz / colors rgba），由 GUI 线程的
@@ -970,6 +1035,25 @@ private:
 
     // 必须在 m_sim->mtx 锁内调用：把 m_userScene 尾部的轨迹段全部重建。
     void rebuildTrajectoryGeomsLocked();
+    // 必须在 m_sim->mtx 锁内调用：在 startIndex 处追加 gizmo 的 geom 段并写 ngeom。
+    // 不可见时只把 ngeom 收回到 startIndex（不画）。
+    void rebuildGizmoGeomsLocked(int startIndex);
+    // 必须在 m_sim->mtx 锁内调用：按当前 m,d 读取跟踪 site 的世界位姿刷新 gizmo
+    // 位姿（仅在可见且非拖动时）。返回位姿是否发生变化（需要重建 geom）。
+    bool updateGizmoPoseFromSiteLocked(const mjModel* m, const mjData* d);
+    // 在 m_sim->mtx 锁内调用：由 scn 相机构造 view*proj 矩阵（视口取 width()/height()），
+    // 并输出世界相机位置。返回 false 表示相机/尺寸不可用。
+    bool buildGizmoCameraLocked(QMatrix4x4& viewProj, QVector3D& camPos) const;
+    // 屏幕空间命中测试：返回手柄索引（0..2 平移 XYZ，3..5 旋转 XYZ），未命中返回 -1。
+    int  gizmoHitTest(const QPointF& mouse, const QMatrix4x4& viewProj) const;
+    // 处理场景鼠标：命中 gizmo 手柄则消费事件并返回 true（不转发给相机/MuJoCo）。
+    bool gizmoHandleMousePress(const QPointF& pos);
+    bool gizmoHandleMouseMove(const QPointF& pos);
+    bool gizmoHandleMouseRelease();
+    void gizmoUpdateHover(const QPointF& pos);
+    // 按当前对齐模式返回轴 0/1/2 的世界向量与旋转环平面基（工具模式下右乘 gizmo 姿态）。
+    QVector3D gizmoAxisVec(int axis) const;
+    void gizmoPlaneBasis(int axis, QVector3D& e1, QVector3D& e2) const;
     // 必须在 m_sim->mtx 锁内调用：按当前 m, d 采样所有自动跟踪的轨迹。
     void sampleTrackedTrajectoriesLocked(const mjModel* m, const mjData* d);
     // 查找 trajectoryId 对应的状态，未找到返回 nullptr。
