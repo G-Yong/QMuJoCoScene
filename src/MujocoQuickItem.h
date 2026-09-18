@@ -122,6 +122,23 @@ class MUJOCOQUICKITEM_EXPORT MujocoQuickItem : public QQuickFramebufferObject, p
     // 底衬 = 深色半透明圆角底板；关掉（默认）则只给文字加 1px 深色描边，
     // 既不挡背景又不会在亮背景上糊掉，跟线框 gizmo 的风格更搭。
     Q_PROPERTY(bool gizmoReadoutChip READ gizmoReadoutChip WRITE setGizmoReadoutChip NOTIFY gizmoReadoutChipChanged)
+    // ------------------------------------------------------------------
+    // 关节实时值面板（画面右上角）
+    // ------------------------------------------------------------------
+    // 每行一个关节：“<名字>  <值>”，等宽字体、名字列对齐、数值右对齐。
+    // 只列 hinge / slide 关节：hinge 用角度（默认度，jointsReadoutDegrees=false 切
+    // 弧度），slide 用米（角度单位对它无意义）。ball / free 关节的 qpos 是多维的，
+    // 一个标量没意义，跳过。
+    // **显示与否、以及字号/颜色/底衬等样式，与 gizmo 的 TCP 读数完全一致**：
+    // 由 gizmoReadoutEnabled / gizmoReadoutFontPx / gizmoReadoutColor /
+    // gizmoReadoutChip 统管，并且只在 gizmo 可见时跟着一起出现（仿真跑起来后
+    // gizmo 自动隐藏，面板也一起收）。所以这里只有「单位」和「位置」两个独立开关。
+    Q_PROPERTY(bool jointsReadoutDegrees READ jointsReadoutDegrees WRITE setJointsReadoutDegrees NOTIFY jointsReadoutDegreesChanged)
+    // 只读文本（内置绘制用它；也可以绑到 QML Text 自己画）。空 = 当前不显示。
+    Q_PROPERTY(QString jointsReadoutText READ jointsReadoutText NOTIFY jointsReadoutTextChanged)
+    // 距右上角的内边距（默认 12,12，像素）。盒子的右上角贴在
+    // (width - margin.x, margin.y)，盒子向左展开。
+    Q_PROPERTY(QPoint jointsReadoutMargin READ jointsReadoutMargin WRITE setJointsReadoutMargin NOTIFY jointsReadoutMarginChanged)
 public:
     enum PrimitiveType {
         PrimitiveBox = 0,
@@ -338,6 +355,13 @@ public:
     void   setGizmoReadoutOffset(const QPoint& o);
     bool   gizmoReadoutChip() const { return m_readoutChip; }
     void   setGizmoReadoutChip(bool on);
+    // 关节实时值面板（右上角）。角度默认度，jointsReadoutDegrees=false 切弧度；
+    // 字号/颜色/底衬/显示开关都复用 gizmo 读数那一套（见上面 gizmoReadout*）。
+    bool    jointsReadoutDegrees() const { return m_jointsDegrees; }
+    void    setJointsReadoutDegrees(bool deg);
+    QString jointsReadoutText() const { return m_jointsText; }
+    QPoint  jointsReadoutMargin() const { return m_jointsMargin; }
+    void    setJointsReadoutMargin(const QPoint& m);
     // 设定 gizmo 跟踪的 site 名（默认 "tcp"）。
     Q_INVOKABLE void setGizmoTrackedSite(const QString& siteName);
     // gizmo 手柄的世界尺寸（米），影响箭头长度/环半径与命中判定。
@@ -834,6 +858,10 @@ signals:
     void gizmoReadoutColorChanged();
     void gizmoReadoutOffsetChanged();
     void gizmoReadoutChipChanged();
+    // 关节实时值面板（显示/字号/颜色跟随 gizmo 读数，见 gizmoReadout*）
+    void jointsReadoutDegreesChanged();
+    void jointsReadoutTextChanged();
+    void jointsReadoutMarginChanged();
     // 拖动 gizmo 时连续发出目标 TCP 世界位姿（位置单位：米；姿态：世界系四元数）。
     void gizmoPoseEdited(const QVector3D& position, const QQuaternion& orientation);
 
@@ -1067,14 +1095,25 @@ private:
     // 最近一次采样到的 TCP 世界坐标（米）：切单位时用它立即重排文本，不用等下一帧。
     QVector3D   m_gizmoPosWorld;
     bool        m_gizmoPosValid  = false;
-    // 内置读数绘制：m_readoutItem 实际类型是 .cpp 内的 GizmoReadoutItem（本类的子项）。
+    // 内置读数绘制：m_readoutItem / m_jointsItem 实际类型都是 .cpp 内的
+    // OverlayTextItem（本类的子项；前者跟随 TCP 投影点，后者贴右上角）。
     QQuickItem* m_readoutItem   = nullptr;
+    QQuickItem* m_jointsItem    = nullptr;
     bool        m_readoutEnabled = true;
     bool        m_readoutMillimeters = true;
     int         m_readoutFontPx  = 26;
     QColor      m_readoutColor   {0xff, 0xff, 0xff};
     QPoint      m_readoutOffset  {14, 14};
     bool        m_readoutChip    = false;
+    // 关节实时值面板：最近一次锁内采样结果（GUI 线程持有；名字只在模型变化时变，
+    // 值每帧刷新），保留它是为了切角度单位时能立即重排，不用等下一帧。
+    // 显示开关/字号/颜色/底衬都是复用 gizmo 读数那一套，这里不再存一份。
+    QStringList     m_jointNames;
+    QVector<int>    m_jointTypes;
+    QVector<double> m_jointValues;
+    QString         m_jointsText;
+    bool        m_jointsDegrees = true;
+    QPoint      m_jointsMargin  {12, 12};
 
     // ------------------------------------------------------------------
     // 点云状态（GPU GL_POINTS 叠加层）
@@ -1131,6 +1170,17 @@ private:
     QString formatGizmoPosText(const QVector3D& pos) const;
     // GUI 线程：把当前读数/样式推给内置绘制子项（m_readoutItem）。
     void updateReadoutItem();
+    // 必须在 m_sim->mtx 锁内调用：采样面板要显示的关节名/类型/当前 qpos
+    //（原始单位：rad / m）。返回 false 表示场景未加载（三个输出清空）。
+    bool sampleJointsReadoutLocked(QStringList& names, QVector<int>& types,
+                                   QVector<double>& values) const;
+    // GUI 线程：把采样结果格式化成面板文本（按 jointsReadoutDegrees 选角度单位）。
+    QString formatJointsText(const QStringList& names, const QVector<int>& types,
+                             const QVector<double>& values) const;
+    // GUI 线程：把面板文本/样式贴到右上角（m_jointsItem）。
+    void updateJointsReadoutItem();
+    // GUI 线程：两个叠加面板共用的开关（总开关/字号/颜色/底衬）变了 —— 一次刷两处。
+    void updateOverlayItems();
     // 处理场景鼠标：命中 gizmo 手柄则消费事件并返回 true（不转发给相机/MuJoCo）。
     bool gizmoHandleMousePress(const QPointF& pos);
     bool gizmoHandleMouseMove(const QPointF& pos);
