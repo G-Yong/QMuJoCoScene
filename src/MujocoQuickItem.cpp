@@ -662,6 +662,16 @@ bool MujocoQuickItem::ensureUserSceneLocked(mujoco::Simulate& sim) {
         m_userScene = new mjvScene;
         mjv_defaultScene(m_userScene);
         mjv_makeScene(nullptr, m_userScene, mujoco::Simulate::kMaxGeom);
+
+        // mjv_makeScene 会把 flags 填成 MuJoCo 默认值（如 Cull Face=1）。而 simulate.cc
+        // 的 user-scn 补丁会把 user_scn 的「flag 变化」回写进 scn.flags —— 若新建的
+        // user_scn 与 scn.flags 不一致，就会把主线程刚设好的渲染 flag
+        // （例如 mjRND_CULL_FACE=0）静默冲掉：setRenderingFlag() 返回 true 却不生效。
+        // 这里新建时主动对齐两边（含 _prev_，避免被误判为「用户改了 flag」）。
+        for (int i = 0; i < mjNRNDFLAG; ++i) {
+            m_userScene->flags[i]        = sim.scn.flags[i];
+            sim.user_scn_flags_prev_[i]  = sim.scn.flags[i];
+        }
     }
     if (!m_userScene->geoms || m_userScene->maxgeom <= 0) {
         setLastError(QStringLiteral("Failed to create MuJoCo user scene"));
