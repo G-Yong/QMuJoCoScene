@@ -29,6 +29,8 @@
 #include <QQuaternion>
 #include <QMatrix4x4>
 #include <QPointF>
+#include <QColor>
+#include <QPoint>
 #include <QtCore/qglobal.h>
 #include <atomic>
 #include <chrono>
@@ -97,6 +99,29 @@ class MUJOCOQUICKITEM_EXPORT MujocoQuickItem : public QQuickFramebufferObject, p
     Q_PROPERTY(bool gizmoDragging READ gizmoDragging NOTIFY gizmoDraggingChanged)
     // gizmo 手柄对齐坐标系：false=世界坐标轴（默认），true=工具坐标系（跟随 TCP 姿态）。
     Q_PROPERTY(bool gizmoToolAligned READ gizmoToolAligned WRITE setGizmoToolAligned NOTIFY gizmoToolAlignedChanged)
+    // TCP 坐标读数：**默认由本类内置绘制**（见下面 gizmoReadout* 系列），不需要 QML
+    // 参与。这两个属性把「文本 + 屏幕位置」另外暴露出去，给想自己渲染（或另作它用）
+    // 的上层用，不用可以忽略。
+    // 之所以不用 MuJoCo 内建标签：它的位图字体只有 ASCII（画不了中文），字号又是离散
+    // 档位（mjtFontScale 只有 6 档）。
+    // gizmoPosText 为空字符串 = 当前不显示（gizmo 隐藏 / 位姿无效 / 相机不可用）；
+    // 米制档的文本里含 '\n'（多行竖排），自己渲染时要按行拆开画。
+    // gizmoPosScreen 是 TCP 在本 item 逻辑像素坐标里的位置（左上角原点，y 向下）。
+    Q_PROPERTY(QString gizmoPosText READ gizmoPosText NOTIFY gizmoPosTextChanged)
+    Q_PROPERTY(QPointF gizmoPosScreen READ gizmoPosScreen NOTIFY gizmoPosScreenChanged)
+    // 读数单位：true（默认）= 毫米（1 位小数，单行），false = 米（3 位小数，三行竖排）。
+    Q_PROPERTY(bool gizmoReadoutMillimeters READ gizmoReadoutMillimeters WRITE setGizmoReadoutMillimeters NOTIFY gizmoReadoutMillimetersChanged)
+    // 内置读数绘制：本类自己用 QPainter 把 gizmoPosText 画成纹理贴到 scenegraph（内部是
+    // 本类的子项，不碰 QQuickFramebufferObject 自己的节点）。下面几个是样式开关：
+    // 总开关（默认开）/ 字号像素（默认 26）/ 文字颜色（默认白）/ 相对 TCP 投影点的
+    // 像素偏移（默认右下 14,14）/ 深色底衬（默认关）。
+    Q_PROPERTY(bool gizmoReadoutEnabled READ gizmoReadoutEnabled WRITE setGizmoReadoutEnabled NOTIFY gizmoReadoutEnabledChanged)
+    Q_PROPERTY(int gizmoReadoutFontPx READ gizmoReadoutFontPx WRITE setGizmoReadoutFontPx NOTIFY gizmoReadoutFontPxChanged)
+    Q_PROPERTY(QColor gizmoReadoutColor READ gizmoReadoutColor WRITE setGizmoReadoutColor NOTIFY gizmoReadoutColorChanged)
+    Q_PROPERTY(QPoint gizmoReadoutOffset READ gizmoReadoutOffset WRITE setGizmoReadoutOffset NOTIFY gizmoReadoutOffsetChanged)
+    // 底衬 = 深色半透明圆角底板；关掉（默认）则只给文字加 1px 深色描边，
+    // 既不挡背景又不会在亮背景上糊掉，跟线框 gizmo 的风格更搭。
+    Q_PROPERTY(bool gizmoReadoutChip READ gizmoReadoutChip WRITE setGizmoReadoutChip NOTIFY gizmoReadoutChipChanged)
 public:
     enum PrimitiveType {
         PrimitiveBox = 0,
@@ -279,21 +304,40 @@ public:
     // 拖动示教 gizmo（6-DoF，仅在仿真停止时使用）
     // ------------------------------------------------------------------
     // 在 TCP（默认 site 名 "tcp"）上叠加一个 rviz 风格的 6 自由度交互 gizmo：
-    // 三个世界轴旋转环围成一圈，环内从 TCP 中心沿每个轴的正负方向各伸出一根
-    // 平移箭头（共 6 根，整体落在旋转环内）；另外在两根正轴之间的对角方向上有
-    // 三个平面拖动手柄（XY/YZ/ZX，各画成一个正方形外框），拖它们可以同时沿
-    // 平面内两个轴移动。中心不画标记。圆环/箭头/平面手柄目前用 mjGEOM_LINE 线框绘制
-    // （见 .cpp 顶部 kGizmoWireframe，可切回实体）。
+    // 三个轴（默认世界轴，见 gizmoToolAligned）的旋转环围成一圈，环内从 TCP 中心
+    // 沿每个轴的正负方向各伸出一根平移箭头（共 6 根，整体落在旋转环内）；另外在
+    // 两根正轴之间的对角方向上有三个平面拖动手柄（XY/YZ/ZX，各画成一个正方形
+    // 外框），拖它们可以同时沿平面内两个轴移动。中心不画标记。圆环/箭头/平面手柄
+    // 目前用 mjGEOM_LINE 线框绘制（见 .cpp 顶部 kGizmoWireframe，可切回实体）；
+    // 线宽未选中 2px、悬停/拖动中 6px（kLineWidthPx / kLineWidthSelPx，单位为像素）。
     // 拖动时按屏幕投影解算目标世界位姿增量，通过 gizmoPoseEdited() 连续发出（位置单位：米；
     // 姿态：世界系四元数），由上层用 IK 落到关节。gizmo 只画进 user_scn，
-    // 不参与物理/存档；仿真开始运行时自动隐藏。手柄始终与世界轴对齐、仅跟随
-    // TCP 位置移动（rviz 交互标记风格），姿态变化只体现在发出的位姿里。
+    // 不参与物理/存档；仿真开始运行时自动隐藏。手柄默认只跟随 TCP 位置移动、
+    // 与世界轴对齐（rviz 交互标记风格）；gizmoToolAligned=true 时改为跟随 TCP
+    // 姿态旋转（工具坐标系）。
     bool gizmoVisible() const { return m_gizmo.visible; }
     void setGizmoVisible(bool visible);
     bool gizmoDragging() const { return m_gizmo.dragging; }
     // 手柄对齐：false=世界轴（默认），true=工具坐标系（手柄随 TCP 姿态旋转）。
     bool gizmoToolAligned() const { return m_gizmo.toolAligned; }
     void setGizmoToolAligned(bool aligned);
+    // TCP 坐标读数（按 gizmoReadoutMillimeters 选单位；文本里可能含 '\n'）与它在
+    // item 逻辑像素坐标里的位置。
+    QString gizmoPosText() const { return m_gizmoPosText; }
+    QPointF gizmoPosScreen() const { return m_gizmoPosScreen; }
+    bool   gizmoReadoutMillimeters() const { return m_readoutMillimeters; }
+    void   setGizmoReadoutMillimeters(bool mm);
+    // 内置读数绘制的样式（改这些不需要动 QML）。
+    bool   gizmoReadoutEnabled() const { return m_readoutEnabled; }
+    void   setGizmoReadoutEnabled(bool on);
+    int    gizmoReadoutFontPx() const { return m_readoutFontPx; }
+    void   setGizmoReadoutFontPx(int px);
+    QColor gizmoReadoutColor() const { return m_readoutColor; }
+    void   setGizmoReadoutColor(const QColor& c);
+    QPoint gizmoReadoutOffset() const { return m_readoutOffset; }
+    void   setGizmoReadoutOffset(const QPoint& o);
+    bool   gizmoReadoutChip() const { return m_readoutChip; }
+    void   setGizmoReadoutChip(bool on);
     // 设定 gizmo 跟踪的 site 名（默认 "tcp"）。
     Q_INVOKABLE void setGizmoTrackedSite(const QString& siteName);
     // gizmo 手柄的世界尺寸（米），影响箭头长度/环半径与命中判定。
@@ -782,6 +826,14 @@ signals:
     void gizmoVisibleChanged();
     void gizmoDraggingChanged();
     void gizmoToolAlignedChanged();
+    void gizmoPosTextChanged();
+    void gizmoPosScreenChanged();
+    void gizmoReadoutMillimetersChanged();
+    void gizmoReadoutEnabledChanged();
+    void gizmoReadoutFontPxChanged();
+    void gizmoReadoutColorChanged();
+    void gizmoReadoutOffsetChanged();
+    void gizmoReadoutChipChanged();
     // 拖动 gizmo 时连续发出目标 TCP 世界位姿（位置单位：米；姿态：世界系四元数）。
     void gizmoPoseEdited(const QVector3D& position, const QQuaternion& orientation);
 
@@ -1007,6 +1059,23 @@ private:
         int         geomCount = 0;
     } m_gizmo;
 
+    // TCP 坐标读数：渲染线程在 onFrameRendered 里只做锁内采样（世界坐标 + 屏幕位置），
+    // 经 queued lambda 到 GUI 线程格式化成 m_gizmoPosText / m_gizmoPosScreen 并发信号
+    // （QML 可绑定读；不读则完全由内置绘制子项消费）。m_gizmoPosText 为空 = 当前不显示。
+    QString     m_gizmoPosText;
+    QPointF     m_gizmoPosScreen;
+    // 最近一次采样到的 TCP 世界坐标（米）：切单位时用它立即重排文本，不用等下一帧。
+    QVector3D   m_gizmoPosWorld;
+    bool        m_gizmoPosValid  = false;
+    // 内置读数绘制：m_readoutItem 实际类型是 .cpp 内的 GizmoReadoutItem（本类的子项）。
+    QQuickItem* m_readoutItem   = nullptr;
+    bool        m_readoutEnabled = true;
+    bool        m_readoutMillimeters = true;
+    int         m_readoutFontPx  = 26;
+    QColor      m_readoutColor   {0xff, 0xff, 0xff};
+    QPoint      m_readoutOffset  {14, 14};
+    bool        m_readoutChip    = false;
+
     // ------------------------------------------------------------------
     // 点云状态（GPU GL_POINTS 叠加层）
     // ------------------------------------------------------------------
@@ -1054,6 +1123,14 @@ private:
     // 屏幕空间命中测试：返回手柄索引（0..5 平移 ±XYZ，6..8 旋转 XYZ，
     // 9..11 平面 XY/YZ/ZX），未命中返回 -1。平面手柄优先于箭头/环。
     int  gizmoHitTest(const QPointF& mouse, const QMatrix4x4& viewProj) const;
+    // 必须在 m_sim->mtx 锁内调用：采样 TCP 的世界坐标与它在 item 逻辑像素坐标里的位置。
+    // 返回 false 表示当前不该显示读数（gizmo 不可见 / 位姿无效 / 相机不可用 / 在相机背后）。
+    bool sampleGizmoReadoutLocked(QVector3D& worldPos, QPointF& screenPos) const;
+    // GUI 线程：把世界坐标（米）按当前单位格式化成读数文本。
+    // 文本里的 '\n' 会被内置绘制当成换行（多行竖排）。
+    QString formatGizmoPosText(const QVector3D& pos) const;
+    // GUI 线程：把当前读数/样式推给内置绘制子项（m_readoutItem）。
+    void updateReadoutItem();
     // 处理场景鼠标：命中 gizmo 手柄则消费事件并返回 true（不转发给相机/MuJoCo）。
     bool gizmoHandleMousePress(const QPointF& pos);
     bool gizmoHandleMouseMove(const QPointF& pos);

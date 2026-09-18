@@ -29,6 +29,13 @@
 #include <QFileInfo>
 #include <QTemporaryFile>
 #include <QDir>
+#include <QPainter>
+#include <QImage>
+#include <QFont>
+#include <QFontDatabase>
+#include <QFontMetricsF>
+#include <QStringList>
+#include <QQuickItem>
 
 #include <chrono>
 #include <algorithm>
@@ -271,6 +278,148 @@ private:
 };
 } // namespace
 
+// ---------------------------------------------------------------------------
+// TCP 坐标读数的绘制子项
+//
+// 单独做成 MujocoQuickItem 的子项，不去碰 QQuickFramebufferObject 自己的节点：
+// 子项有独立的 QSG 节点，天然画在父项内容之上。
+// 文字用 QPainter 画进 QImage（矢量字体、支持中文、按 devicePixelRatio 提清晰度），
+// 再当纹理贴到 scenegraph；文字/字号/颜色/DPR 都没变时只更新节点位置，不重画。
+// 文本里的 '\n' 会被拆成多行竖排（盒宽取最长行、盒高 = 行数 × 行高）。
+//
+// 线程：setReadout() 在 GUI 线程调（只改成员 + setPosition + update()）；
+// updatePaintNode() 在 scenegraph 同步阶段跑（此时 GUI 线程被阻塞），直接读成员安全。
+// ---------------------------------------------------------------------------
+class GizmoReadoutItem : public QQuickItem {
+public:
+    explicit GizmoReadoutItem(QQuickItem* parent) : QQuickItem(parent) {
+        setFlag(QQuickItem::ItemHasContents, true);
+        setAcceptedMouseButtons(Qt::NoButton);   // 不吃鼠标，别挡住 gizmo 拖动
+        setVisible(false);
+    }
+
+    // 在 GUI 线程调用：文本为空 = 不显示。
+    void setReadout(const QString& text, const QPointF& anchor, const QPoint& offset,
+                    int fontPx, const QColor& color, bool chip) {
+        const QPointF pos = anchor + QPointF(offset);
+        if (m_text == text && m_fontPx == fontPx && m_color == color &&
+            m_chip == chip && position() == pos)
+            return;
+        m_text   = text;
+        m_fontPx = qMax(6, fontPx);
+        m_color  = color;
+        m_chip   = chip;
+        setPosition(pos);
+        update();
+    }
+
+protected:
+    QSGNode* updatePaintNode(QSGNode* node, UpdatePaintNodeData*) override {
+        auto* tn = static_cast<QSGSimpleTextureNode*>(node);
+        if (m_text.isEmpty()) {
+            if (tn) tn->setRect(QRectF());       // 收成 0 尺寸 = 不画
+            return tn;
+        }
+        const qreal dpr = window() ? window()->devicePixelRatio() : 1.0;
+        if (!tn || textureDirty(dpr)) {
+            const QImage img = renderImage(dpr);
+            if (!img.isNull() && window()) {
+                QSGTexture* tex = window()->createTextureFromImage(
+                    img, QQuickWindow::TextureHasAlphaChannel);
+                if (!tn) {
+                    tn = new QSGSimpleTextureNode();
+                    tn->setOwnsTexture(true);
+                    tn->setFiltering(QSGTexture::Linear);
+                }
+                tn->setTexture(tex);             // 接管所有权，旧纹理自动释放
+                m_drawnText   = m_text;
+                m_drawnFontPx = m_fontPx;
+                m_drawnColor  = m_color;
+                m_drawnChip   = m_chip;
+                m_drawnDpr    = dpr;
+                m_size = QSizeF(img.width() / dpr, img.height() / dpr);
+                setSize(m_size);                 // 让 item 的几何与画出来的盒子一致
+            }
+        }
+        if (tn) tn->setRect(QRectF(0, 0, m_size.width(), m_size.height()));
+        return tn;
+    }
+
+private:
+    bool textureDirty(qreal dpr) const {
+        return m_text != m_drawnText || m_fontPx != m_drawnFontPx ||
+               m_color != m_drawnColor || m_chip != m_drawnChip || dpr != m_drawnDpr;
+    }
+
+    QImage renderImage(qreal dpr) const {
+        // 等宽字体：数字变化时盒子宽度不会跳。
+        QFont f = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+        f.setPixelSize(m_fontPx);
+        f.setStyleStrategy(QFont::PreferAntialias);
+        const QFontMetricsF fm(f);
+        const qreal padX = m_chip ? 7.0 : 1.0;
+        const qreal padY = m_chip ? 4.0 : 1.0;
+        // QPainter::drawText(QPointF, QString) 不认 '\n' —— 换行符既不换行也不
+        // 报错，整串会被当单行画掉。所以这里自己按行拆开，逐行画。
+        const QStringList lines = m_text.split(QLatin1Char('\n'));
+        const qreal lineH = fm.height();
+        qreal tw = 0.0;
+        for (const QString& ln : lines) tw = qMax(tw, fm.horizontalAdvance(ln));
+        const qreal th = lineH * qMax(1, lines.size());
+        const QSizeF sz(tw + 2 * padX, th + 2 * padY);
+        QImage img(QSize(qCeil(sz.width() * dpr), qCeil(sz.height() * dpr)),
+                   QImage::Format_ARGB32_Premultiplied);
+        if (img.isNull()) return img;
+        img.setDevicePixelRatio(dpr);
+        img.fill(Qt::transparent);
+        QPainter p(&img);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setRenderHint(QPainter::TextAntialiasing);
+        p.setFont(f);
+        // 逐行基线：第 i 行 = 上边距 + i×行高 + ascent（单行时与原来的垂直居中结果相同）。
+        // off 是描边用的偏移量。
+        auto drawLines = [&](const QPointF& off) {
+            for (int i = 0; i < lines.size(); ++i) {
+                p.drawText(QPointF(padX + off.x(),
+                                   padY + i * lineH + fm.ascent() + off.y()),
+                           lines.at(i));
+            }
+        };
+        if (m_chip) {
+            // 可选：深色半透明圆角底衬
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(16, 20, 24, 208));
+            p.drawRoundedRect(QRectF(0, 0, sz.width(), sz.height()), 4.0, 4.0);
+        } else {
+            // 默认：不画底衬，只给字加 1px 深色描边 —— 跟线框 gizmo 风格一致，
+            // 又不会在亮背景上糊掉。
+            p.setPen(QColor(0, 0, 0, 190));
+            for (int dx = -1; dx <= 1; ++dx) {
+                for (int dy = -1; dy <= 1; ++dy) {
+                    if (dx || dy) drawLines(QPointF(dx, dy));
+                }
+            }
+        }
+        p.setPen(m_color);
+        drawLines(QPointF(0.0, 0.0));
+        return img;
+    }
+
+    QString m_text;
+    // 下面几个初值只是占位：构造后第一次 updateReadoutItem() 就会被
+    // MujocoQuickItem 的 m_readout* 成员覆盖（那里才是真正的默认值）。
+    int     m_fontPx = 26;
+    QColor  m_color  {0xff, 0xff, 0xff};
+    bool    m_chip   = false;
+    // 上一次实际生成纹理用的参数（在渲染线程读写）
+    QString m_drawnText;
+    int     m_drawnFontPx = 0;
+    QColor  m_drawnColor;
+    bool    m_drawnChip = false;
+    qreal   m_drawnDpr = 0.0;
+    QSizeF  m_size;
+};
+
 // ===========================================================================
 // MujocoQuickItem
 // ===========================================================================
@@ -286,6 +435,8 @@ MujocoQuickItem::MujocoQuickItem(QQuickItem* parent)
     setAcceptHoverEvents(true);
     setFlag(ItemHasContents, true);
     setActiveFocusOnTab(true);
+    // TCP 坐标读数的内置绘制子项（自绘，不依赖 QML）
+    m_readoutItem = new GizmoReadoutItem(this);
 }
 
 MujocoQuickItem::~MujocoQuickItem() {
@@ -1465,6 +1616,95 @@ bool MujocoQuickItem::buildGizmoCameraLocked(QMatrix4x4& viewProj, QVector3D& ca
     viewProj = proj * view;
     camPos = pos;
     return true;
+}
+
+bool MujocoQuickItem::sampleGizmoReadoutLocked(QVector3D& worldPos, QPointF& screenPos) const {
+    if (!m_sim || !m_gizmo.visible || !m_gizmo.poseValid) return false;
+    QMatrix4x4 vp;
+    QVector3D camPos;
+    if (!buildGizmoCameraLocked(vp, camPos)) return false;
+    bool ok = false;
+    const QPointF p = gizmo_detail::worldToScreen(
+        vp, m_gizmo.pos, float(width()), float(height()), &ok);
+    if (!ok) return false;                 // 落在相机背后
+    worldPos  = m_gizmo.pos;
+    screenPos = p;
+    return true;
+}
+
+QString MujocoQuickItem::formatGizmoPosText(const QVector3D& pos) const {
+    if (m_readoutMillimeters) {
+        // 毫米，1 位小数（分辨率 0.1 mm）
+        return QStringLiteral("X %1\nY %2\nZ %3 mm")
+            .arg(double(pos.x()) * 1000.0, 0, 'f', 1)
+            .arg(double(pos.y()) * 1000.0, 0, 'f', 1)
+            .arg(double(pos.z()) * 1000.0, 0, 'f', 1);
+    }
+    // 米，3 位小数（分辨率 1 mm）。三行竖排；等宽字体下用 fieldWidth=7 右对齐，
+    // 让小数点对齐（正负号、位数不同也不会歪）。
+    return QStringLiteral("X %1\nY %2\nZ %3 m")
+        .arg(double(pos.x()), 7, 'f', 3)
+        .arg(double(pos.y()), 7, 'f', 3)
+        .arg(double(pos.z()), 7, 'f', 3);
+}
+
+void MujocoQuickItem::setGizmoReadoutMillimeters(bool mm) {
+    if (m_readoutMillimeters == mm) return;
+    m_readoutMillimeters = mm;
+    // 立即用上一次采样到的位置重排一次，不用等下一帧
+    const QString t = m_gizmoPosValid ? formatGizmoPosText(m_gizmoPosWorld) : QString();
+    if (m_gizmoPosText != t) {
+        m_gizmoPosText = t;
+        emit gizmoPosTextChanged();
+    }
+    updateReadoutItem();
+    emit gizmoReadoutMillimetersChanged();
+}
+
+void MujocoQuickItem::updateReadoutItem() {
+    if (!m_readoutItem) return;
+    auto* item = static_cast<GizmoReadoutItem*>(m_readoutItem);
+    const bool show = m_readoutEnabled && !m_gizmoPosText.isEmpty();
+    item->setVisible(show);
+    if (!show) return;
+    item->setReadout(m_gizmoPosText, m_gizmoPosScreen, m_readoutOffset,
+                     m_readoutFontPx, m_readoutColor, m_readoutChip);
+}
+
+void MujocoQuickItem::setGizmoReadoutEnabled(bool on) {
+    if (m_readoutEnabled == on) return;
+    m_readoutEnabled = on;
+    updateReadoutItem();
+    emit gizmoReadoutEnabledChanged();
+}
+
+void MujocoQuickItem::setGizmoReadoutFontPx(int px) {
+    const int v = std::clamp(px, 6, 96);
+    if (m_readoutFontPx == v) return;
+    m_readoutFontPx = v;
+    updateReadoutItem();
+    emit gizmoReadoutFontPxChanged();
+}
+
+void MujocoQuickItem::setGizmoReadoutColor(const QColor& c) {
+    if (!c.isValid() || m_readoutColor == c) return;
+    m_readoutColor = c;
+    updateReadoutItem();
+    emit gizmoReadoutColorChanged();
+}
+
+void MujocoQuickItem::setGizmoReadoutOffset(const QPoint& o) {
+    if (m_readoutOffset == o) return;
+    m_readoutOffset = o;
+    updateReadoutItem();
+    emit gizmoReadoutOffsetChanged();
+}
+
+void MujocoQuickItem::setGizmoReadoutChip(bool on) {
+    if (m_readoutChip == on) return;
+    m_readoutChip = on;
+    updateReadoutItem();
+    emit gizmoReadoutChipChanged();
 }
 
 int MujocoQuickItem::gizmoHitTest(const QPointF& mouse, const QMatrix4x4& vp) const {
@@ -4186,6 +4426,10 @@ void MujocoQuickItem::onFrameRendered() {
     bool gizmoHidden = false;
     int  histScrub = m_historyScrubIndex;
     int  histCap   = m_historyCapacity;
+    // TCP 坐标读数（锁内采样世界坐标 + 屏幕位置，随后在 GUI 线程格式化/发信号）
+    QVector3D tcpWorld;
+    QPointF   tcpPos;
+    bool      tcpValid = false;
     if (m_sim) {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
         if (m_sim->m_ && m_sim->d_) {
@@ -4198,6 +4442,8 @@ void MujocoQuickItem::onFrameRendered() {
                 rebuildTrajectoryGeomsLocked();
             }
         }
+        // TCP 坐标读数：投影到 item 逻辑像素坐标（由内置绘制子项用矢量字体画）
+        tcpValid = sampleGizmoReadoutLocked(tcpWorld, tcpPos);
         if (m_sim->m_) {
             histScrub = m_sim->scrub_index;
             histCap   = m_sim->nhistory_ > 0 ? m_sim->nhistory_ - 1 : 0;
@@ -4244,7 +4490,7 @@ void MujocoQuickItem::onFrameRendered() {
         applyCameraTransitionLocked(*m_sim);
     }
 
-    QMetaObject::invokeMethod(this, [this, statusText, contacts = std::move(contacts), simRunChanged, gizmoHidden, histScrub, histCap] {
+    QMetaObject::invokeMethod(this, [this, statusText, contacts = std::move(contacts), simRunChanged, gizmoHidden, histScrub, histCap, tcpWorld, tcpPos, tcpValid] {
         if (simRunChanged) emit simulationRunningChanged();
         if (gizmoHidden) emit gizmoVisibleChanged();
         if (m_historyCapacity != histCap) { m_historyCapacity = histCap; emit historyCapacityChanged(); }
@@ -4259,6 +4505,20 @@ void MujocoQuickItem::onFrameRendered() {
             m_contactSnapshot = std::move(contacts);
             emit contactsChanged();
         }
+        // TCP 坐标读数（在本线程格式化，单位切换/样式改动都能立刻生效）
+        m_gizmoPosValid = tcpValid;
+        if (tcpValid) m_gizmoPosWorld = tcpWorld;
+        const QString tcpText = tcpValid ? formatGizmoPosText(tcpWorld) : QString();
+        if (m_gizmoPosText != tcpText) {
+            m_gizmoPosText = tcpText;
+            emit gizmoPosTextChanged();
+        }
+        if (m_gizmoPosScreen != tcpPos) {
+            m_gizmoPosScreen = tcpPos;
+            emit gizmoPosScreenChanged();
+        }
+        // 内置绘制（GUI 线程）
+        updateReadoutItem();
         update();
     }, Qt::QueuedConnection);
 }
