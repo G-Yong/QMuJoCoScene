@@ -280,8 +280,10 @@ public:
     // ------------------------------------------------------------------
     // 在 TCP（默认 site 名 "tcp"）上叠加一个 rviz 风格的 6 自由度交互 gizmo：
     // 三个世界轴旋转环围成一圈，环内从 TCP 中心沿每个轴的正负方向各伸出一根
-    // 平移箭头（共 6 根，整体落在旋转环内）。中心不画标记。圆环/箭头目前用
-    // mjGEOM_LINE 线框绘制（见 .cpp 顶部 kGizmoWireframe，可切回实体）。
+    // 平移箭头（共 6 根，整体落在旋转环内）；另外在两根正轴之间的对角方向上有
+    // 三个平面拖动手柄（XY/YZ/ZX，各画成一个正方形外框），拖它们可以同时沿
+    // 平面内两个轴移动。中心不画标记。圆环/箭头/平面手柄目前用 mjGEOM_LINE 线框绘制
+    // （见 .cpp 顶部 kGizmoWireframe，可切回实体）。
     // 拖动时按屏幕投影解算目标世界位姿增量，通过 gizmoPoseEdited() 连续发出（位置单位：米；
     // 姿态：世界系四元数），由上层用 IK 落到关节。gizmo 只画进 user_scn，
     // 不参与物理/存档；仿真开始运行时自动隐藏。手柄始终与世界轴对齐、仅跟随
@@ -979,7 +981,7 @@ private:
     // 线程的 onFrameRendered 都会读写）。geom 段紧跟在轨迹段之后（tail），
     // geomStart 在每次 rebuildTrajectoryGeomsLocked 末尾更新为轨迹段结束下标。
     // handle 索引：0..5 = 平移箭头（每个轴一对，先负后正：0=-X 1=+X 2=-Y
-    // 3=+Y 4=-Z 5=+Z）；6..8 = 旋转 X/Y/Z 环。
+    // 3=+Y 4=-Z 5=+Z）；6..8 = 旋转 X/Y/Z 环；9..11 = 平面拖动 XY/YZ/ZX。
     // ------------------------------------------------------------------
     struct GizmoState {
         bool        visible = false;
@@ -992,8 +994,9 @@ private:
         int         hovered = -1;
         int         active = -1;
         bool        dragging = false;
-        int         dragMode = 0;        // 0=平移 1=旋转
-        int         dragAxis = 0;        // 0=X 1=Y 2=Z
+        int         dragMode = 0;        // 0=平移 1=旋转 2=平面
+        int         dragAxis = 0;        // 0=X 1=Y 2=Z（平面模式 = 平面内第一根轴）
+        int         dragAxisB = 0;       // 平面模式：平面内第二根轴
         int         dragSign = 1;        // 平移方向：-1=负向箭头，+1=正向箭头
         bool        toolAligned = false; // false=世界轴对齐，true=工具坐标系对齐
         QPointF     lastMouse;
@@ -1048,7 +1051,8 @@ private:
     // 在 m_sim->mtx 锁内调用：由 scn 相机构造 view*proj 矩阵（视口取 width()/height()），
     // 并输出世界相机位置。返回 false 表示相机/尺寸不可用。
     bool buildGizmoCameraLocked(QMatrix4x4& viewProj, QVector3D& camPos) const;
-    // 屏幕空间命中测试：返回手柄索引（0..5 平移 ±XYZ，6..8 旋转 XYZ），未命中返回 -1。
+    // 屏幕空间命中测试：返回手柄索引（0..5 平移 ±XYZ，6..8 旋转 XYZ，
+    // 9..11 平面 XY/YZ/ZX），未命中返回 -1。平面手柄优先于箭头/环。
     int  gizmoHitTest(const QPointF& mouse, const QMatrix4x4& viewProj) const;
     // 处理场景鼠标：命中 gizmo 手柄则消费事件并返回 true（不转发给相机/MuJoCo）。
     bool gizmoHandleMousePress(const QPointF& pos);

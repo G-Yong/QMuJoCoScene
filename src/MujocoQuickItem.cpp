@@ -91,6 +91,31 @@ static float pointSegmentDistance(const QPointF& p, const QPointF& a, const QPoi
     return std::sqrt(float(d.x() * d.x() + d.y() * d.y()));
 }
 
+// 点是否落在（凸）四边形内：屏幕空间叉积同号即在内。
+static bool pointInQuad(const QPointF& p, const QPointF quad[4]) {
+    int pos = 0, neg = 0;
+    for (int i = 0; i < 4; ++i) {
+        const QPointF& a = quad[i];
+        const QPointF& b = quad[(i + 1) % 4];
+        const float cr = float((b.x() - a.x()) * (p.y() - a.y()) -
+                               (b.y() - a.y()) * (p.x() - a.x()));
+        if (cr > 0.0f)      ++pos;
+        else if (cr < 0.0f) ++neg;
+    }
+    return pos == 0 || neg == 0;
+}
+
+// 四边形面积（像素²，鞋带公式）。用来剔除几乎侧对相机的退化投影。
+static float quadAreaPx(const QPointF quad[4]) {
+    float a = 0.0f;
+    for (int i = 0; i < 4; ++i) {
+        const QPointF& p = quad[i];
+        const QPointF& q = quad[(i + 1) % 4];
+        a += float(p.x() * q.y() - q.x() * p.y());
+    }
+    return std::abs(a) * 0.5f;
+}
+
 // 世界坐标轴向量。
 static QVector3D axisVector(int axis) {
     switch (axis) {
@@ -125,6 +150,16 @@ static inline float handleSign(int handle) {
     return (handle < kTranslateHandleCount && (handle % 2) == 0) ? -1.0f : 1.0f;
 }
 
+//   9..11 平面拖动手柄：XY / YZ / ZX（两轴联动）
+constexpr int kPlaneHandleBase  = 9;
+constexpr int kPlaneHandleCount = 3;
+
+static inline int planeIndex(int handle) { return handle - kPlaneHandleBase; }
+// 三个平面循环取轴：(A,B) = (0,1) (1,2) (2,0)，法向轴 = (2,0,1)。
+static inline int planeAxisA(int handle)      { return planeIndex(handle); }
+static inline int planeAxisB(int handle)      { return (planeIndex(handle) + 1) % 3; }
+static inline int planeNormalAxis(int handle) { return (planeIndex(handle) + 2) % 3; }
+
 // ---- 各部件尺寸（m_gizmo.size 的倍率）------------------------------------
 // 层次：旋转环在外圈，6 根平移箭头从 TCP 中心沿轴向外画，整体落在环内。
 constexpr float kRingRadiusScale  = 0.90f;  // 旋转环半径
@@ -145,6 +180,15 @@ constexpr float kLineWidthSelPx       = 6.0f;   // 线框线宽：悬停 / 拖�
 // 线框模式下锥头用 4 笔棱线表示（否则箭头退化成光杆）。
 constexpr float kArrowHeadScale       = 0.14f;  // 锥头长度 × size
 constexpr float kArrowHeadRadiusScale = 0.056f; // 锥头底面半径 × size
+
+// ---- 平面拖动手柄（9..11 = XY / YZ / ZX）尺寸 ---------------------------
+// 每块 pad 放在两根正轴之间的对角方向上，只画一个正方形（四条外框）。
+constexpr float kPlaneOffsetScale = 0.28f;  // pad 中心沿两轴的偏移 × size
+constexpr float kPlaneHalfScale   = 0.06f;  // pad 半边长 × size
+// 投影面积小于此值视为"几乎侧对相机"，不做内部优先（否则一条细线就能抢走点击）。
+constexpr float kPlaneMinAreaPx2  = 64.0f;  // 像素²
+// 平面拖动时两个屏幕方向近乎平行就无解，用这个正弦阈值（≈3°）挡住抖动。
+constexpr float kPlaneMinSinPx    = 0.05f;
 
 constexpr int   kRingSegments = 40;      // 旋转环的采样段数
 constexpr float kHitTolPx     = 8.0f;    // 命中容差（像素），与线框线宽匹配
@@ -1217,7 +1261,7 @@ void MujocoQuickItem::rebuildGizmoGeomsLocked(int startIndex) {
         {0.90f, 0.22f, 0.22f}, {0.25f, 0.80f, 0.28f}, {0.30f, 0.52f, 0.95f}};
 
     auto handleColor = [&](int handle, float out[4]) {
-        const int axis = handleAxis(handle);
+        const int axis = handle < kPlaneHandleBase ? handleAxis(handle) : planeNormalAxis(handle);
         float k = 1.0f;
         if (handle == m_gizmo.active)       k = 1.6f;   // 拖动中：最亮
         else if (handle == m_gizmo.hovered) k = 1.28f;  // 悬停：稍亮
@@ -1313,6 +1357,25 @@ void MujocoQuickItem::rebuildGizmoGeomsLocked(int startIndex) {
         }
     }
 
+    // 平面拖动手柄（handle 9..11）：每块只画一个正方形外框，放在两根正轴之间的
+    // 对角方向上，与箭头/环都不重叠。
+    for (int p = 0; p < kPlaneHandleCount; ++p) {
+        const int handle = kPlaneHandleBase + p;
+        float color[4];
+        handleColor(handle, color);
+        const float lw = handleLineWidth(handle);
+
+        const QVector3D u = gizmoAxisVec(planeAxisA(handle));
+        const QVector3D v = gizmoAxisVec(planeAxisB(handle));
+        const QVector3D padC = c + (u + v) * (size * kPlaneOffsetScale);
+        const float half = size * kPlaneHalfScale;
+        // 四个角（与 gizmoHitTest 里的取法一致）
+        const QVector3D sq[4] = { padC + (u + v) * half, padC + (u - v) * half,
+                                  padC - (u + v) * half, padC + (v - u) * half };
+        for (int i = 0; i < 4; ++i)
+            addLine(sq[i], sq[(i + 1) % 4], color, lw);
+    }
+
     m_gizmo.geomCount = g - startIndex;
     m_userScene->ngeom = std::min(g, maxg);
 }
@@ -1406,6 +1469,24 @@ int MujocoQuickItem::gizmoHitTest(const QPointF& mouse, const QMatrix4x4& vp) co
 
     float best = kHitTolPx;
     int bestHandle = -1;
+
+    // 平面拖动手柄（9..11）优先：鼠标落在 pad 的投影四边形内就直接返回，免得 pad
+    // 靠内的那个角被沿途的箭头抢走。投影几乎侧对相机（面积太小）时跳过，不抢点击。
+    for (int p = 0; p < kPlaneHandleCount; ++p) {
+        const int handle = kPlaneHandleBase + p;
+        const QVector3D u = gizmoAxisVec(planeAxisA(handle));
+        const QVector3D v = gizmoAxisVec(planeAxisB(handle));
+        const QVector3D padC = c + (u + v) * (m_gizmo.size * kPlaneOffsetScale);
+        const float half = m_gizmo.size * kPlaneHalfScale;
+        const QVector3D corner[4] = { padC + (u + v) * half, padC + (u - v) * half,
+                                      padC - (u + v) * half, padC + (v - u) * half };
+        QPointF quad[4];
+        bool ok = true;
+        for (int i = 0; i < 4 && ok; ++i)
+            quad[i] = worldToScreen(vp, corner[i], w, h, &ok);
+        if (ok && quadAreaPx(quad) > kPlaneMinAreaPx2 && pointInQuad(mouse, quad))
+            return handle;
+    }
 
     // 平移箭头（0..5）：投影线段 [根部, 尖端] 到鼠标的像素距离。线段只覆盖箭头
     // 自身（根部在 TCP 中心，所以中心附近可点中的就是最近的那根箭头）。
@@ -1536,8 +1617,19 @@ bool MujocoQuickItem::gizmoHandleMousePress(const QPointF& pos) {
         const int handle = gizmoHitTest(pos, vp);
         if (handle < 0) return false;
         m_gizmo.dragging = true;
-        m_gizmo.dragMode = (handle >= gizmo_detail::kHandleRingBase) ? 1 : 0;
-        m_gizmo.dragAxis = gizmo_detail::handleAxis(handle);
+        if (handle < gizmo_detail::kTranslateHandleCount) {       // 平移箭头
+            m_gizmo.dragMode  = 0;
+            m_gizmo.dragAxis  = gizmo_detail::handleAxis(handle);
+            m_gizmo.dragAxisB = 0;
+        } else if (handle < gizmo_detail::kPlaneHandleBase) {     // 旋转环
+            m_gizmo.dragMode  = 1;
+            m_gizmo.dragAxis  = gizmo_detail::handleAxis(handle);
+            m_gizmo.dragAxisB = 0;
+        } else {                                                   // 平面拖动
+            m_gizmo.dragMode  = 2;
+            m_gizmo.dragAxis  = gizmo_detail::planeAxisA(handle);
+            m_gizmo.dragAxisB = gizmo_detail::planeAxisB(handle);
+        }
         m_gizmo.dragSign = gizmo_detail::handleSign(handle);
         m_gizmo.active = handle;
         m_gizmo.hovered = handle;
@@ -1587,6 +1679,29 @@ bool MujocoQuickItem::gizmoHandleMouseMove(const QPointF& pos) {
                                        float(pos.y() - m_gizmo.lastMouse.y()));
                     const float screenMove = QVector2D::dotProduct(md, dir);
                     candPos = m_gizmo.pos + a * (screenMove * (L / len));
+                }
+            }
+        } else if (m_gizmo.dragMode == 2) {
+            // 平面拖动：把鼠标位移分解到平面内两个轴的屏幕方向（解 2×2 线性方程）。
+            // 两个屏幕方向近乎平行时方程组病态，直接不产生位移。
+            const QVector3D u = gizmoAxisVec(m_gizmo.dragAxis);
+            const QVector3D v = gizmoAxisVec(m_gizmo.dragAxisB);
+            bool ok0 = false, ok1 = false, ok2 = false;
+            const QPointF s0 = gizmo_detail::worldToScreen(vp, m_gizmo.pos, w, h, &ok0);
+            // 参考点取单位长度（1 米）：pu/pv 就是"每米对应多少像素"
+            const QPointF su = gizmo_detail::worldToScreen(vp, m_gizmo.pos + u, w, h, &ok1);
+            const QPointF sv = gizmo_detail::worldToScreen(vp, m_gizmo.pos + v, w, h, &ok2);
+            if (ok0 && ok1 && ok2) {
+                const QVector2D pu(float(su.x() - s0.x()), float(su.y() - s0.y()));
+                const QVector2D pv(float(sv.x() - s0.x()), float(sv.y() - s0.y()));
+                const float det   = pu.x() * pv.y() - pu.y() * pv.x();
+                const float scale = pu.length() * pv.length();
+                if (scale > 1e-6f && std::abs(det) / scale > gizmo_detail::kPlaneMinSinPx) {
+                    const float dx = float(pos.x() - m_gizmo.lastMouse.x());
+                    const float dy = float(pos.y() - m_gizmo.lastMouse.y());
+                    const float dA = (dx * pv.y() - dy * pv.x()) / det;   // 单位：米
+                    const float dB = (pu.x() * dy - pu.y() * dx) / det;
+                    candPos = m_gizmo.pos + u * dA + v * dB;
                 }
             }
         } else {
