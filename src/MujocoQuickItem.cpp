@@ -109,8 +109,45 @@ static void planeBasis(int axis, QVector3D& e1, QVector3D& e2) {
     }
 }
 
+// ---- 手柄索引编码 ---------------------------------------------------------
+//   0..5 平移箭头（每个轴一对，先负后正）：0=-X 1=+X  2=-Y 3=+Y  4=-Z 5=+Z
+//   6..8 旋转环：6=X 7=Y 8=Z
+// 编码顺序被「渲染 / 命中测试 / 拖动」三处共用，故统一放在这里解码。
+constexpr int kTranslateHandleCount = 6;   // 平移箭头个数（3 轴 × 2 方向）
+constexpr int kHandleRingBase       = 6;   // 第一个旋转环手柄的索引
+
+static inline int handleAxis(int handle) {
+    return handle < kTranslateHandleCount ? handle / 2 : handle - kHandleRingBase;
+}
+
+// 平移箭头的方向符号：同一轴内偶数索引 = 负方向，奇数索引 = 正方向。
+static inline float handleSign(int handle) {
+    return (handle < kTranslateHandleCount && (handle % 2) == 0) ? -1.0f : 1.0f;
+}
+
+// ---- 各部件尺寸（m_gizmo.size 的倍率）------------------------------------
+// 层次：旋转环在外圈，6 根平移箭头从 TCP 中心沿轴向外画，整体落在环内。
+constexpr float kRingRadiusScale  = 0.90f;  // 旋转环半径
+constexpr float kRingMinorScale   = 0.022f; // 旋转环管半径（仅实体模式用）
+constexpr float kArrowStartScale  = 0.0f;   // 箭头根部：TCP 中心
+constexpr float kArrowLengthScale = 0.55f;  // 箭头长度（尖端 = 0.55×size，仍在环内）
+constexpr float kArrowTipScale    = kArrowStartScale + kArrowLengthScale;  // 尖端
+constexpr float kArrowShaftScale  = 0.035f; // 箭头杆半径（仅实体模式用）
+
+// ---- 渲染方式（A/B 对比用）----------------------------------------------
+// true  = 圆环/箭头都用 mjGEOM_LINE 画（线框）。注意渲染器里线宽是
+//         glLineWidth(size[0] * vis.global.linewidth)，即 **像素**：粗细不随
+//         缩放变化，且画线前会临时关掉 GL_LIGHTING（不受光照）。
+// false = 圆环用胶囊链、箭头用 mjGEOM_ARROW（实体，受光照）。
+constexpr bool  kGizmoWireframe       = true;
+constexpr float kLineWidthPx          = 2.0f;   // 线框线宽：未选中（像素）
+constexpr float kLineWidthSelPx       = 6.0f;   // 线框线宽：悬停 / 拖动中（像素）
+// 线框模式下锥头用 4 笔棱线表示（否则箭头退化成光杆）。
+constexpr float kArrowHeadScale       = 0.14f;  // 锥头长度 × size
+constexpr float kArrowHeadRadiusScale = 0.056f; // 锥头底面半径 × size
+
 constexpr int   kRingSegments = 40;      // 旋转环的采样段数
-constexpr float kHitTolPx     = 11.0f;   // 命中容差（像素）
+constexpr float kHitTolPx     = 8.0f;    // 命中容差（像素），与线框线宽匹配
 constexpr float kTwoPi        = 6.28318530717958647692f;
 
 } // namespace gizmo_detail
@@ -1180,7 +1217,7 @@ void MujocoQuickItem::rebuildGizmoGeomsLocked(int startIndex) {
         {0.90f, 0.22f, 0.22f}, {0.25f, 0.80f, 0.28f}, {0.30f, 0.52f, 0.95f}};
 
     auto handleColor = [&](int handle, float out[4]) {
-        const int axis = handle % 3;
+        const int axis = handleAxis(handle);
         float k = 1.0f;
         if (handle == m_gizmo.active)       k = 1.6f;   // 拖动中：最亮
         else if (handle == m_gizmo.hovered) k = 1.28f;  // 悬停：稍亮
@@ -1192,46 +1229,85 @@ void MujocoQuickItem::rebuildGizmoGeomsLocked(int startIndex) {
 
     const QVector3D c = m_gizmo.pos;
     const float size = m_gizmo.size;
-    const float arrowLen = size * 1.25f;
-    const float arrowRadius = size * 0.045f;
-    const float ringRadius = size * 0.9f;
-    const float ringRadiusMinor = size * 0.022f;
 
     int g = startIndex;
 
-    // 平移箭头（handle 0..2）
-    for (int axis = 0; axis < 3 && g < maxg; ++axis) {
-        const QVector3D a = gizmoAxisVec(axis);
-        const QVector3D tip = c + a * arrowLen;
-        float color[4];
-        handleColor(axis, color);
+    // 手柄线宽：悬停 / 拖动中加粗（与 handleColor 的提亮口径一致）。
+    auto handleLineWidth = [&](int handle) {
+        return (handle == m_gizmo.active || handle == m_gizmo.hovered)
+                   ? kLineWidthSelPx : kLineWidthPx;
+    };
+
+    // 追加一条 mjGEOM_LINE 连接体（widthPx 单位是像素，见 kLineWidthPx 处注释）。
+    auto addLine = [&](const QVector3D& p0, const QVector3D& p1,
+                       const float color[4], float widthPx) {
+        if (g >= maxg) return;
         mjvGeom* geom = &m_userScene->geoms[g];
-        mjv_initGeom(geom, mjGEOM_ARROW, nullptr, nullptr, nullptr, color);
-        mjtNum from[3] = { c.x(),   c.y(),   c.z()   };
-        mjtNum to[3]   = { tip.x(), tip.y(), tip.z() };
-        mjv_connector(geom, mjGEOM_ARROW, arrowRadius, from, to);
+        mjv_initGeom(geom, mjGEOM_LINE, nullptr, nullptr, nullptr, color);
+        const mjtNum from[3] = { p0.x(), p0.y(), p0.z() };
+        const mjtNum to[3]   = { p1.x(), p1.y(), p1.z() };
+        mjv_connector(geom, mjGEOM_LINE, widthPx, from, to);
         ++g;
+    };
+
+    // 平移箭头（handle 0..5）：每个轴的正负方向各一根，共 6 根。
+    // 根部在 TCP 中心（kArrowStartScale == 0），沿轴向外伸；整体落在旋转环内。
+    for (int handle = 0; handle < kTranslateHandleCount && g < maxg; ++handle) {
+        const int axis = handleAxis(handle);
+        const QVector3D a = gizmoHandleDir(handle);
+        float color[4];
+        handleColor(handle, color);
+        const QVector3D p0 = c + a * (size * kArrowStartScale);  // 根部（TCP 中心）
+        const QVector3D p1 = c + a * (size * kArrowTipScale);    // 尖端
+
+        if (!kGizmoWireframe) {
+            // 实体：交给 mjGEOM_ARROW（锥头比例由渲染器写死，我们控制不了）。
+            mjvGeom* geom = &m_userScene->geoms[g];
+            mjv_initGeom(geom, mjGEOM_ARROW, nullptr, nullptr, nullptr, color);
+            const mjtNum from[3] = { p0.x(), p0.y(), p0.z() };
+            const mjtNum to[3]   = { p1.x(), p1.y(), p1.z() };
+            mjv_connector(geom, mjGEOM_ARROW, size * kArrowShaftScale, from, to);
+            ++g;
+            continue;
+        }
+
+        // 线框：杆 + 4 笔棱线组成的锥头，这样从任何角度看都是箭头而不是光杆。
+        const float lw = handleLineWidth(handle);
+        const QVector3D headBase = c + a * (size * (kArrowTipScale - kArrowHeadScale));
+        addLine(p0, headBase, color, lw);
+        QVector3D e1, e2;
+        gizmoPlaneBasis(axis, e1, e2);
+        const float headR = size * kArrowHeadRadiusScale;
+        for (int k = 0; k < 4; ++k) {
+            const float t = kTwoPi * (0.125f + 0.25f * float(k));   // 45/135/225/315°
+            addLine(headBase + headR * (std::cos(t) * e1 + std::sin(t) * e2), p1, color, lw);
+        }
     }
 
-    // 旋转环（handle 3..5），每个环用若干胶囊段近似
+    // 旋转环（handle 6..8），两种画法用同样的段数，方便 A/B 对比
     for (int axis = 0; axis < 3; ++axis) {
-        const int handle = 3 + axis;
+        const int handle = kHandleRingBase + axis;
         float color[4];
         handleColor(handle, color);
         QVector3D e1, e2;
         gizmoPlaneBasis(axis, e1, e2);
+        const float ringRadius = size * kRingRadiusScale;
         QVector3D prev;
         for (int i = 0; i <= kRingSegments; ++i) {
             if (g >= maxg) break;
             const float t = float(i) / float(kRingSegments) * kTwoPi;
             const QVector3D p = c + ringRadius * (std::cos(t) * e1 + std::sin(t) * e2);
             if (i > 0) {
-                mjvGeom* geom = &m_userScene->geoms[g];
-                mjv_initGeom(geom, mjGEOM_CAPSULE, nullptr, nullptr, nullptr, color);
-                mjtNum from[3] = { prev.x(), prev.y(), prev.z() };
-                mjtNum to[3]   = { p.x(),    p.y(),    p.z()    };
-                mjv_connector(geom, mjGEOM_CAPSULE, ringRadiusMinor, from, to);
-                ++g;
+                if (kGizmoWireframe) {
+                    addLine(prev, p, color, handleLineWidth(handle));
+                } else {
+                    mjvGeom* geom = &m_userScene->geoms[g];
+                    mjv_initGeom(geom, mjGEOM_CAPSULE, nullptr, nullptr, nullptr, color);
+                    const mjtNum from[3] = { prev.x(), prev.y(), prev.z() };
+                    const mjtNum to[3]   = { p.x(),    p.y(),    p.z()    };
+                    mjv_connector(geom, mjGEOM_CAPSULE, size * kRingMinorScale, from, to);
+                    ++g;
+                }
             }
             prev = p;
         }
@@ -1281,6 +1357,10 @@ void MujocoQuickItem::gizmoPlaneBasis(int axis, QVector3D& e1, QVector3D& e2) co
     }
 }
 
+QVector3D MujocoQuickItem::gizmoHandleDir(int handle) const {
+    return gizmoAxisVec(gizmo_detail::handleAxis(handle)) * gizmo_detail::handleSign(handle);
+}
+
 bool MujocoQuickItem::buildGizmoCameraLocked(QMatrix4x4& viewProj, QVector3D& camPos) const {
     if (!m_sim) return false;
     const float w = float(width());
@@ -1320,23 +1400,26 @@ int MujocoQuickItem::gizmoHitTest(const QPointF& mouse, const QMatrix4x4& vp) co
     const float w = float(width());
     const float h = float(height());
     const QVector3D c = m_gizmo.pos;
-    const float arrowLen = m_gizmo.size * 1.25f;
-    const float ringR = m_gizmo.size * 0.9f;
+    const float arrowRoot = m_gizmo.size * kArrowStartScale;
+    const float arrowTip  = m_gizmo.size * kArrowTipScale;
+    const float ringR = m_gizmo.size * kRingRadiusScale;
 
     float best = kHitTolPx;
     int bestHandle = -1;
 
-    // 平移箭头：投影线段 [中心, 尖端] 到鼠标的像素距离。
-    for (int axis = 0; axis < 3; ++axis) {
-        bool okC = false, okT = false;
-        const QPointF a = worldToScreen(vp, c, w, h, &okC);
-        const QPointF b = worldToScreen(vp, c + gizmoAxisVec(axis) * arrowLen, w, h, &okT);
-        if (!okC || !okT) continue;
+    // 平移箭头（0..5）：投影线段 [根部, 尖端] 到鼠标的像素距离。线段只覆盖箭头
+    // 自身（根部在 TCP 中心，所以中心附近可点中的就是最近的那根箭头）。
+    for (int handle = 0; handle < kTranslateHandleCount; ++handle) {
+        bool okR = false, okT = false;
+        const QVector3D dir = gizmoHandleDir(handle);
+        const QPointF a = worldToScreen(vp, c + dir * arrowRoot, w, h, &okR);
+        const QPointF b = worldToScreen(vp, c + dir * arrowTip, w, h, &okT);
+        if (!okR || !okT) continue;
         const float d = pointSegmentDistance(mouse, a, b);
-        if (d < best) { best = d; bestHandle = axis; }
+        if (d < best) { best = d; bestHandle = handle; }
     }
 
-    // 旋转环：投影环的采样折线，取到鼠标的最近像素距离。
+    // 旋转环（6..8）：投影环的采样折线，取到鼠标的最近像素距离。
     for (int axis = 0; axis < 3; ++axis) {
         QVector3D e1, e2;
         gizmoPlaneBasis(axis, e1, e2);
@@ -1347,11 +1430,12 @@ int MujocoQuickItem::gizmoHitTest(const QPointF& mouse, const QMatrix4x4& vp) co
             const float t = float(i) / float(kRingSegments) * kTwoPi;
             bool okp = false;
             const QPointF sp = worldToScreen(vp, c + ringR * (std::cos(t) * e1 + std::sin(t) * e2),
-                                             w, h, &okp);            if (okp && havePrev) dmin = std::min(dmin, pointSegmentDistance(mouse, prev, sp));
+                                             w, h, &okp);
+            if (okp && havePrev) dmin = std::min(dmin, pointSegmentDistance(mouse, prev, sp));
             prev = sp;
             havePrev = okp;
         }
-        if (dmin < best) { best = dmin; bestHandle = 3 + axis; }
+        if (dmin < best) { best = dmin; bestHandle = kHandleRingBase + axis; }
     }
     return bestHandle;
 }
@@ -1452,8 +1536,9 @@ bool MujocoQuickItem::gizmoHandleMousePress(const QPointF& pos) {
         const int handle = gizmoHitTest(pos, vp);
         if (handle < 0) return false;
         m_gizmo.dragging = true;
-        m_gizmo.dragMode = (handle >= 3) ? 1 : 0;
-        m_gizmo.dragAxis = handle % 3;
+        m_gizmo.dragMode = (handle >= gizmo_detail::kHandleRingBase) ? 1 : 0;
+        m_gizmo.dragAxis = gizmo_detail::handleAxis(handle);
+        m_gizmo.dragSign = gizmo_detail::handleSign(handle);
         m_gizmo.active = handle;
         m_gizmo.hovered = handle;
         m_gizmo.lastMouse = pos;
@@ -1477,18 +1562,22 @@ bool MujocoQuickItem::gizmoHandleMouseMove(const QPointF& pos) {
         QMatrix4x4 vp; QVector3D camPos;
         if (!buildGizmoCameraLocked(vp, camPos)) { m_gizmo.lastMouse = pos; return true; }
 
-        const QVector3D a = gizmoAxisVec(m_gizmo.dragAxis);
+        const QVector3D axisVec = gizmoAxisVec(m_gizmo.dragAxis);
         const float w = float(width());
         const float h = float(height());
         QVector3D candPos = m_gizmo.pos;
         QQuaternion candOri = m_gizmo.ori;
 
         if (m_gizmo.dragMode == 0) {
-            // 平移：把鼠标位移投影到屏幕上的轴方向，换算成世界位移。
-            const float L = m_gizmo.size;
+            // 平移：把鼠标位移投影到屏幕上的手柄方向（含正负号），换算成世界位移。
+            // 参考点取箭头自身（根部/尖端），投影比例就在箭头所在位置处量取。
+            const QVector3D a = axisVec * float(m_gizmo.dragSign);
+            const float r0 = m_gizmo.size * gizmo_detail::kArrowStartScale;
+            const float r1 = m_gizmo.size * gizmo_detail::kArrowTipScale;
+            const float L = r1 - r0;
             bool ok1 = false, ok2 = false;
-            const QPointF s0 = gizmo_detail::worldToScreen(vp, m_gizmo.pos, w, h, &ok1);
-            const QPointF s1 = gizmo_detail::worldToScreen(vp, m_gizmo.pos + a * L, w, h, &ok2);
+            const QPointF s0 = gizmo_detail::worldToScreen(vp, m_gizmo.pos + a * r0, w, h, &ok1);
+            const QPointF s1 = gizmo_detail::worldToScreen(vp, m_gizmo.pos + a * r1, w, h, &ok2);
             if (ok1 && ok2) {
                 QVector2D dir(float(s1.x() - s0.x()), float(s1.y() - s0.y()));
                 const float len = dir.length();
@@ -1511,10 +1600,10 @@ bool MujocoQuickItem::gizmoHandleMouseMove(const QPointF& pos) {
                 if (v0.length() > 1e-3f && v1.length() > 1e-3f) {
                     const float a0 = std::atan2(v0.y(), v0.x());
                     const float a1 = std::atan2(v1.y(), v1.x());
-                    const float facing = QVector3D::dotProduct(a, (m_gizmo.pos - camPos));
+                    const float facing = QVector3D::dotProduct(axisVec, (m_gizmo.pos - camPos));
                     const float sign = (facing > 0.0f) ? 1.0f : -1.0f;
                     const float deg = float(qRadiansToDegrees(double(a1 - a0))) * sign;
-                    candOri = QQuaternion::fromAxisAndAngle(a, deg) * m_gizmo.ori;
+                    candOri = QQuaternion::fromAxisAndAngle(axisVec, deg) * m_gizmo.ori;
                 }
             }
         }
