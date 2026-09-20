@@ -68,141 +68,8 @@ static float easeInOutCubic(float t) {
                      : 1.0f - std::pow(-2.0f * t + 2.0f, 3.0f) / 2.0f;
 }
 
-// ===========================================================================
-// 拖动示教 gizmo 的纯数学辅助（与 Qt3D / MuJoCo 无关，仅屏幕投影 + 命中）
-// ===========================================================================
-namespace gizmo_detail {
-
-// 世界坐标 → 屏幕像素（item 逻辑像素，y 向下）。ok=false 表示点在相机背后。
-static QPointF worldToScreen(const QMatrix4x4& viewProj, const QVector3D& world,
-                             float w, float h, bool* ok) {
-    const QVector4D clip = viewProj * QVector4D(world, 1.0f);
-    if (clip.w() <= 1e-6f) { if (ok) *ok = false; return QPointF(); }
-    const float nx = clip.x() / clip.w();
-    const float ny = clip.y() / clip.w();
-    if (ok) *ok = true;
-    return QPointF((nx * 0.5f + 0.5f) * w, (1.0f - (ny * 0.5f + 0.5f)) * h);
-}
-
-// 点 p 到线段 [a,b] 的 2D 距离（像素）。
-static float pointSegmentDistance(const QPointF& p, const QPointF& a, const QPointF& b) {
-    const QPointF ab = b - a;
-    const float len2 = float(ab.x() * ab.x() + ab.y() * ab.y());
-    float t = 0.0f;
-    if (len2 > 1e-9f) {
-        t = float(((p.x() - a.x()) * ab.x() + (p.y() - a.y()) * ab.y()) / len2);
-        t = std::clamp(t, 0.0f, 1.0f);
-    }
-    const QPointF proj(a.x() + t * ab.x(), a.y() + t * ab.y());
-    const QPointF d = p - proj;
-    return std::sqrt(float(d.x() * d.x() + d.y() * d.y()));
-}
-
-// 点是否落在（凸）四边形内：屏幕空间叉积同号即在内。
-static bool pointInQuad(const QPointF& p, const QPointF quad[4]) {
-    int pos = 0, neg = 0;
-    for (int i = 0; i < 4; ++i) {
-        const QPointF& a = quad[i];
-        const QPointF& b = quad[(i + 1) % 4];
-        const float cr = float((b.x() - a.x()) * (p.y() - a.y()) -
-                               (b.y() - a.y()) * (p.x() - a.x()));
-        if (cr > 0.0f)      ++pos;
-        else if (cr < 0.0f) ++neg;
-    }
-    return pos == 0 || neg == 0;
-}
-
-// 四边形面积（像素²，鞋带公式）。用来剔除几乎侧对相机的退化投影。
-static float quadAreaPx(const QPointF quad[4]) {
-    float a = 0.0f;
-    for (int i = 0; i < 4; ++i) {
-        const QPointF& p = quad[i];
-        const QPointF& q = quad[(i + 1) % 4];
-        a += float(p.x() * q.y() - q.x() * p.y());
-    }
-    return std::abs(a) * 0.5f;
-}
-
-// 世界坐标轴向量。
-static QVector3D axisVector(int axis) {
-    switch (axis) {
-        case 0:  return QVector3D(1, 0, 0);
-        case 1:  return QVector3D(0, 1, 0);
-        default: return QVector3D(0, 0, 1);
-    }
-}
-
-// 与 axis 正交的平面基（e1,e2），用于生成旋转环上的采样点。
-static void planeBasis(int axis, QVector3D& e1, QVector3D& e2) {
-    switch (axis) {
-        case 0:  e1 = QVector3D(0, 1, 0); e2 = QVector3D(0, 0, 1); break; // X
-        case 1:  e1 = QVector3D(0, 0, 1); e2 = QVector3D(1, 0, 0); break; // Y
-        default: e1 = QVector3D(1, 0, 0); e2 = QVector3D(0, 1, 0); break; // Z
-    }
-}
-
-// ---- 手柄索引编码 ---------------------------------------------------------
-//   0..5 平移箭头（每个轴一对，先负后正）：0=-X 1=+X  2=-Y 3=+Y  4=-Z 5=+Z
-//   6..8 旋转环：6=X 7=Y 8=Z
-// 编码顺序被「渲染 / 命中测试 / 拖动」三处共用，故统一放在这里解码。
-constexpr int kTranslateHandleCount = 6;   // 平移箭头个数（3 轴 × 2 方向）
-constexpr int kHandleRingBase       = 6;   // 第一个旋转环手柄的索引
-
-static inline int handleAxis(int handle) {
-    return handle < kTranslateHandleCount ? handle / 2 : handle - kHandleRingBase;
-}
-
-// 平移箭头的方向符号：同一轴内偶数索引 = 负方向，奇数索引 = 正方向。
-static inline float handleSign(int handle) {
-    return (handle < kTranslateHandleCount && (handle % 2) == 0) ? -1.0f : 1.0f;
-}
-
-//   9..11 平面拖动手柄：XY / YZ / ZX（两轴联动）
-constexpr int kPlaneHandleBase  = 9;
-constexpr int kPlaneHandleCount = 3;
-
-static inline int planeIndex(int handle) { return handle - kPlaneHandleBase; }
-// 三个平面循环取轴：(A,B) = (0,1) (1,2) (2,0)，法向轴 = (2,0,1)。
-static inline int planeAxisA(int handle)      { return planeIndex(handle); }
-static inline int planeAxisB(int handle)      { return (planeIndex(handle) + 1) % 3; }
-static inline int planeNormalAxis(int handle) { return (planeIndex(handle) + 2) % 3; }
-
-// ---- 各部件尺寸（m_gizmo.size 的倍率）------------------------------------
-// 层次：旋转环在外圈，6 根平移箭头从 TCP 中心沿轴向外画，整体落在环内。
-constexpr float kRingRadiusScale  = 0.90f;  // 旋转环半径
-constexpr float kRingMinorScale   = 0.022f; // 旋转环管半径（仅实体模式用）
-constexpr float kArrowStartScale  = 0.0f;   // 箭头根部：TCP 中心
-constexpr float kArrowLengthScale = 0.55f;  // 箭头长度（尖端 = 0.55×size，仍在环内）
-constexpr float kArrowTipScale    = kArrowStartScale + kArrowLengthScale;  // 尖端
-constexpr float kArrowShaftScale  = 0.035f; // 箭头杆半径（仅实体模式用）
-
-// ---- 渲染方式（A/B 对比用）----------------------------------------------
-// true  = 圆环/箭头都用 mjGEOM_LINE 画（线框）。注意渲染器里线宽是
-//         glLineWidth(size[0] * vis.global.linewidth)，即 **像素**：粗细不随
-//         缩放变化，且画线前会临时关掉 GL_LIGHTING（不受光照）。
-// false = 圆环用胶囊链、箭头用 mjGEOM_ARROW（实体，受光照）。
-constexpr bool  kGizmoWireframe       = true;
-constexpr float kLineWidthPx          = 2.0f;   // 线框线宽：未选中（像素）
-constexpr float kLineWidthSelPx       = 6.0f;   // 线框线宽：悬停 / 拖动中（像素）
-// 线框模式下锥头用 4 笔棱线表示（否则箭头退化成光杆）。
-constexpr float kArrowHeadScale       = 0.14f;  // 锥头长度 × size
-constexpr float kArrowHeadRadiusScale = 0.056f; // 锥头底面半径 × size
-
-// ---- 平面拖动手柄（9..11 = XY / YZ / ZX）尺寸 ---------------------------
-// 每块 pad 放在两根正轴之间的对角方向上，只画一个正方形（四条外框）。
-constexpr float kPlaneOffsetScale = 0.28f;  // pad 中心沿两轴的偏移 × size
-constexpr float kPlaneHalfScale   = 0.06f;  // pad 半边长 × size
-// 投影面积小于此值视为"几乎侧对相机"，不做内部优先（否则一条细线就能抢走点击）。
-constexpr float kPlaneMinAreaPx2  = 64.0f;  // 像素²
-// 平面拖动时两个屏幕方向近乎平行就无解，用这个正弦阈值（≈3°）挡住抖动。
-constexpr float kPlaneMinSinPx    = 0.05f;
-
-constexpr int   kRingSegments = 40;      // 旋转环的采样段数
-constexpr float kHitTolPx     = 8.0f;    // 命中容差（像素），与线框线宽匹配
-constexpr float kTwoPi        = 6.28318530717958647692f;
-
-} // namespace gizmo_detail
-
+// gizmo 的纯数学辅助 + 尺寸常量 + 状态/几何/命中/拖动，已剥离到 DragTeachGizmo。
+// 这里只保留编排：见本类的 gizmoHandle*/buildGizmoCameraLocked/sampleGizmoReadoutLocked。
 
 // ===========================================================================
 // MujocoFboRenderer：Qt Quick scenegraph 渲染线程
@@ -868,11 +735,7 @@ void MujocoQuickItem::setSimulationRunning(bool running) {
             sim.scrub_index = 0;
             sim.pert.active = 0;
             // 仿真开始运行：自动隐藏拖动示教 gizmo。
-            if (m_gizmo.visible) {
-                m_gizmo.visible = false;
-                m_gizmo.dragging = false;
-                m_gizmo.active = -1;
-                m_gizmo.hovered = -1;
+            if (m_gizmo.setVisible(false)) {
                 rebuildTrajectoryGeomsLocked();
                 hideGizmo = true;
             }
@@ -1426,190 +1289,8 @@ void MujocoQuickItem::rebuildTrajectoryGeomsLocked() {
         }
         if (g >= maxg) break;
     }
-    m_gizmo.geomStart = g;
-    rebuildGizmoGeomsLocked(g);
-}
-
-// ===========================================================================
-// 拖动示教 gizmo 实现
-// ===========================================================================
-void MujocoQuickItem::rebuildGizmoGeomsLocked(int startIndex) {
-    using namespace gizmo_detail;
-    if (!m_userScene || !m_userScene->geoms) return;
-    const int maxg = m_userScene->maxgeom;
-
-    if (!m_gizmo.visible || !m_gizmo.poseValid) {
-        m_gizmo.geomCount = 0;
-        m_userScene->ngeom = std::min(startIndex, maxg);
-        return;
-    }
-
-    // 三轴基础色（X 红 / Y 绿 / Z 蓝）；hover/active 提亮。
-    static const float kBase[3][3] = {
-        {0.90f, 0.22f, 0.22f}, {0.25f, 0.80f, 0.28f}, {0.30f, 0.52f, 0.95f}};
-
-    auto handleColor = [&](int handle, float out[4]) {
-        const int axis = handle < kPlaneHandleBase ? handleAxis(handle) : planeNormalAxis(handle);
-        float k = 1.0f;
-        if (handle == m_gizmo.active)       k = 1.6f;   // 拖动中：最亮
-        else if (handle == m_gizmo.hovered) k = 1.28f;  // 悬停：稍亮
-        out[0] = std::min(1.0f, kBase[axis][0] * k);
-        out[1] = std::min(1.0f, kBase[axis][1] * k);
-        out[2] = std::min(1.0f, kBase[axis][2] * k);
-        out[3] = 1.0f;
-    };
-
-    const QVector3D c = m_gizmo.pos;
-    const float size = m_gizmo.size;
-
-    int g = startIndex;
-
-    // 手柄线宽：悬停 / 拖动中加粗（与 handleColor 的提亮口径一致）。
-    auto handleLineWidth = [&](int handle) {
-        return (handle == m_gizmo.active || handle == m_gizmo.hovered)
-                   ? kLineWidthSelPx : kLineWidthPx;
-    };
-
-    // 追加一条 mjGEOM_LINE 连接体（widthPx 单位是像素，见 kLineWidthPx 处注释）。
-    auto addLine = [&](const QVector3D& p0, const QVector3D& p1,
-                       const float color[4], float widthPx) {
-        if (g >= maxg) return;
-        mjvGeom* geom = &m_userScene->geoms[g];
-        mjv_initGeom(geom, mjGEOM_LINE, nullptr, nullptr, nullptr, color);
-        const mjtNum from[3] = { p0.x(), p0.y(), p0.z() };
-        const mjtNum to[3]   = { p1.x(), p1.y(), p1.z() };
-        mjv_connector(geom, mjGEOM_LINE, widthPx, from, to);
-        ++g;
-    };
-
-    // 平移箭头（handle 0..5）：每个轴的正负方向各一根，共 6 根。
-    // 根部在 TCP 中心（kArrowStartScale == 0），沿轴向外伸；整体落在旋转环内。
-    for (int handle = 0; handle < kTranslateHandleCount && g < maxg; ++handle) {
-        const int axis = handleAxis(handle);
-        const QVector3D a = gizmoHandleDir(handle);
-        float color[4];
-        handleColor(handle, color);
-        const QVector3D p0 = c + a * (size * kArrowStartScale);  // 根部（TCP 中心）
-        const QVector3D p1 = c + a * (size * kArrowTipScale);    // 尖端
-
-        if (!kGizmoWireframe) {
-            // 实体：交给 mjGEOM_ARROW（锥头比例由渲染器写死，我们控制不了）。
-            mjvGeom* geom = &m_userScene->geoms[g];
-            mjv_initGeom(geom, mjGEOM_ARROW, nullptr, nullptr, nullptr, color);
-            const mjtNum from[3] = { p0.x(), p0.y(), p0.z() };
-            const mjtNum to[3]   = { p1.x(), p1.y(), p1.z() };
-            mjv_connector(geom, mjGEOM_ARROW, size * kArrowShaftScale, from, to);
-            ++g;
-            continue;
-        }
-
-        // 线框：杆 + 4 笔棱线组成的锥头，这样从任何角度看都是箭头而不是光杆。
-        const float lw = handleLineWidth(handle);
-        const QVector3D headBase = c + a * (size * (kArrowTipScale - kArrowHeadScale));
-        addLine(p0, headBase, color, lw);
-        QVector3D e1, e2;
-        gizmoPlaneBasis(axis, e1, e2);
-        const float headR = size * kArrowHeadRadiusScale;
-        for (int k = 0; k < 4; ++k) {
-            const float t = kTwoPi * (0.125f + 0.25f * float(k));   // 45/135/225/315°
-            addLine(headBase + headR * (std::cos(t) * e1 + std::sin(t) * e2), p1, color, lw);
-        }
-    }
-
-    // 旋转环（handle 6..8），两种画法用同样的段数，方便 A/B 对比
-    for (int axis = 0; axis < 3; ++axis) {
-        const int handle = kHandleRingBase + axis;
-        float color[4];
-        handleColor(handle, color);
-        QVector3D e1, e2;
-        gizmoPlaneBasis(axis, e1, e2);
-        const float ringRadius = size * kRingRadiusScale;
-        QVector3D prev;
-        for (int i = 0; i <= kRingSegments; ++i) {
-            if (g >= maxg) break;
-            const float t = float(i) / float(kRingSegments) * kTwoPi;
-            const QVector3D p = c + ringRadius * (std::cos(t) * e1 + std::sin(t) * e2);
-            if (i > 0) {
-                if (kGizmoWireframe) {
-                    addLine(prev, p, color, handleLineWidth(handle));
-                } else {
-                    mjvGeom* geom = &m_userScene->geoms[g];
-                    mjv_initGeom(geom, mjGEOM_CAPSULE, nullptr, nullptr, nullptr, color);
-                    const mjtNum from[3] = { prev.x(), prev.y(), prev.z() };
-                    const mjtNum to[3]   = { p.x(),    p.y(),    p.z()    };
-                    mjv_connector(geom, mjGEOM_CAPSULE, size * kRingMinorScale, from, to);
-                    ++g;
-                }
-            }
-            prev = p;
-        }
-    }
-
-    // 平面拖动手柄（handle 9..11）：每块只画一个正方形外框，放在两根正轴之间的
-    // 对角方向上，与箭头/环都不重叠。
-    for (int p = 0; p < kPlaneHandleCount; ++p) {
-        const int handle = kPlaneHandleBase + p;
-        float color[4];
-        handleColor(handle, color);
-        const float lw = handleLineWidth(handle);
-
-        const QVector3D u = gizmoAxisVec(planeAxisA(handle));
-        const QVector3D v = gizmoAxisVec(planeAxisB(handle));
-        const QVector3D padC = c + (u + v) * (size * kPlaneOffsetScale);
-        const float half = size * kPlaneHalfScale;
-        // 四个角（与 gizmoHitTest 里的取法一致）
-        const QVector3D sq[4] = { padC + (u + v) * half, padC + (u - v) * half,
-                                  padC - (u + v) * half, padC + (v - u) * half };
-        for (int i = 0; i < 4; ++i)
-            addLine(sq[i], sq[(i + 1) % 4], color, lw);
-    }
-
-    m_gizmo.geomCount = g - startIndex;
-    m_userScene->ngeom = std::min(g, maxg);
-}
-
-bool MujocoQuickItem::updateGizmoPoseFromSiteLocked(const mjModel* m, const mjData* d) {
-    if (!m || !d || !m_gizmo.visible || m_gizmo.dragging) return false;
-    m_gizmo.siteId = mj_name2id(m, mjOBJ_SITE, m_gizmo.siteName.toUtf8().constData());
-    if (m_gizmo.siteId < 0 || m_gizmo.siteId >= m->nsite) {
-        if (m_gizmo.poseValid) { m_gizmo.poseValid = false; return true; }
-        return false;
-    }
-    const mjtNum* xp = d->site_xpos + 3 * m_gizmo.siteId;
-    const mjtNum* xm = d->site_xmat + 9 * m_gizmo.siteId;
-    const QVector3D pos(static_cast<float>(xp[0]), static_cast<float>(xp[1]),
-                        static_cast<float>(xp[2]));
-    // site_xmat 是行主序 3x3；QMatrix3x3 也是行主序。
-    float rot[9];
-    for (int i = 0; i < 9; ++i) rot[i] = float(xm[i]);
-    const QQuaternion ori = QQuaternion::fromRotationMatrix(QMatrix3x3(rot));
-
-    const bool moved = !m_gizmo.poseValid ||
-                       (pos - m_gizmo.pos).lengthSquared() > 1e-10f ||
-                       !qFuzzyCompare(ori, m_gizmo.ori);
-    m_gizmo.pos = pos;
-    m_gizmo.ori = ori;
-    m_gizmo.solvablePos = pos;
-    m_gizmo.solvableOri = ori;
-    m_gizmo.poseValid = true;
-    return moved;
-}
-
-QVector3D MujocoQuickItem::gizmoAxisVec(int axis) const {
-    const QVector3D a = gizmo_detail::axisVector(axis);
-    return m_gizmo.toolAligned ? m_gizmo.ori.rotatedVector(a) : a;
-}
-
-void MujocoQuickItem::gizmoPlaneBasis(int axis, QVector3D& e1, QVector3D& e2) const {
-    gizmo_detail::planeBasis(axis, e1, e2);
-    if (m_gizmo.toolAligned) {
-        e1 = m_gizmo.ori.rotatedVector(e1);
-        e2 = m_gizmo.ori.rotatedVector(e2);
-    }
-}
-
-QVector3D MujocoQuickItem::gizmoHandleDir(int handle) const {
-    return gizmoAxisVec(gizmo_detail::handleAxis(handle)) * gizmo_detail::handleSign(handle);
+    // gizmo 段紧跟轨迹段之后：交给 DragTeachGizmo 写 user_scn / 收集叠加层，返回新 ngeom。
+    m_userScene->ngeom = m_gizmo.rebuildGeoms(m_userScene, g);
 }
 
 bool MujocoQuickItem::buildGizmoCameraLocked(QMatrix4x4& viewProj, QVector3D& camPos) const {
@@ -1626,6 +1307,16 @@ bool MujocoQuickItem::buildGizmoCameraLocked(QMatrix4x4& viewProj, QVector3D& ca
 
     QMatrix4x4 view;
     view.lookAt(pos, pos + fwd, up);
+    // 场景变换（MuJoCo UI 的 Translate / Rotate / Scale，即 scn.translate/rotate/scale）：
+    // render_gl3.c 的 setView() 会把它接在 view 之后，PointCloudRenderer 里也是这么复刻的。
+    // **不接上的话，用户一旋转/缩放场景，这套投影就和实际渲染错位** —— 表现就是 gizmo
+    // 被渲染在变换后的位置、大小随场景旋转乱变，而命中测试/读数还按未变换的算。
+    // enabletransform 默认关闭，此时三个变换都是单位量，接上是恒等。
+    if (scn.enabletransform) {
+        view.translate(scn.translate[0], scn.translate[1], scn.translate[2]);
+        view.rotate(QQuaternion(scn.rotate[0], scn.rotate[1], scn.rotate[2], scn.rotate[3]));
+        view.scale(scn.scale);
+    }
 
     const float aspect = w / h;
     const float top = cam.frustum_top;
@@ -1646,15 +1337,15 @@ bool MujocoQuickItem::buildGizmoCameraLocked(QMatrix4x4& viewProj, QVector3D& ca
 }
 
 bool MujocoQuickItem::sampleGizmoReadoutLocked(QVector3D& worldPos, QPointF& screenPos) const {
-    if (!m_sim || !m_gizmo.visible || !m_gizmo.poseValid) return false;
+    if (!m_sim || !m_gizmo.visible() || !m_gizmo.poseValid()) return false;
     QMatrix4x4 vp;
     QVector3D camPos;
     if (!buildGizmoCameraLocked(vp, camPos)) return false;
     bool ok = false;
-    const QPointF p = gizmo_detail::worldToScreen(
-        vp, m_gizmo.pos, float(width()), float(height()), &ok);
+    const QPointF p = DragTeachGizmo::worldToScreen(
+        vp, m_gizmo.pos(), float(width()), float(height()), &ok);
     if (!ok) return false;                 // 落在相机背后
-    worldPos  = m_gizmo.pos;
+    worldPos  = m_gizmo.pos();
     screenPos = p;
     return true;
 }
@@ -1684,18 +1375,13 @@ void MujocoQuickItem::setGizmoReadoutMillimeters(bool mm) {
         m_gizmoPosText = t;
         emit gizmoPosTextChanged();
     }
-    updateReadoutItem();
+    updateJointsReadoutItem();
     emit gizmoReadoutMillimetersChanged();
 }
 
 void MujocoQuickItem::updateReadoutItem() {
-    if (!m_readoutItem) return;
-    auto* item = static_cast<OverlayTextItem*>(m_readoutItem);
-    const bool show = m_readoutEnabled && !m_gizmoPosText.isEmpty();
-    item->setVisible(show);
-    if (!show) return;
-    item->setReadout(m_gizmoPosText, m_gizmoPosScreen, m_readoutOffset,
-                     m_readoutFontPx, m_readoutColor, m_readoutChip);
+    // TCP 坐标已并入右上角面板（updateJointsReadoutItem），悬浮读数不再单独显示。
+    if (m_readoutItem) m_readoutItem->setVisible(false);
 }
 
 void MujocoQuickItem::setGizmoReadoutEnabled(bool on) {
@@ -1793,15 +1479,21 @@ QString MujocoQuickItem::formatJointsText(const QStringList& names,
 void MujocoQuickItem::updateJointsReadoutItem() {
     if (!m_jointsItem) return;
     auto* item = static_cast<OverlayTextItem*>(m_jointsItem);
+    // 右上角面板 = TCP 坐标块 + 关节值，一起显示。
+    QString panel = m_gizmoPosText;
+    if (!m_jointsText.isEmpty()) {
+        if (!panel.isEmpty()) panel += QStringLiteral("\n\n");
+        panel += m_jointsText;
+    }
     // 显示与否跟 gizmo 读数一致：读数总开关关掉、或 gizmo 当前不可见（例如仿真在跑）
     // 时一起藏起来。样式（字号/颜色/底衬）也直接复用 gizmo 读数那一套，不另设开关。
     // m_gizmo.visible 这里不加锁读 —— 与公开 getter gizmoVisible() 同口径，可见性
     // 每次变化都会发 gizmoVisibleChanged，构造里已接上重贴面板。
-    const bool show = m_readoutEnabled && m_gizmo.visible && !m_jointsText.isEmpty();
+    const bool show = m_readoutEnabled && m_gizmo.visible() && !panel.isEmpty();
     item->setVisible(show);
     if (!show) return;
     // 右上角：盒子的右上角贴在 (width - margin.x, margin.y)，盒子向左展开。
-    item->setReadout(m_jointsText,
+    item->setReadout(panel,
                      QPointF(width() - m_jointsMargin.x(), m_jointsMargin.y()),
                      QPoint(0, 0), m_readoutFontPx, m_readoutColor, m_readoutChip,
                      OverlayTextItem::BoxLeft);
@@ -1834,89 +1526,23 @@ void MujocoQuickItem::setJointsReadoutMargin(const QPoint& m) {
     emit jointsReadoutMarginChanged();
 }
 
-int MujocoQuickItem::gizmoHitTest(const QPointF& mouse, const QMatrix4x4& vp) const {
-    using namespace gizmo_detail;
-    if (!m_gizmo.poseValid) return -1;
-    const float w = float(width());
-    const float h = float(height());
-    const QVector3D c = m_gizmo.pos;
-    const float arrowRoot = m_gizmo.size * kArrowStartScale;
-    const float arrowTip  = m_gizmo.size * kArrowTipScale;
-    const float ringR = m_gizmo.size * kRingRadiusScale;
-
-    float best = kHitTolPx;
-    int bestHandle = -1;
-
-    // 平面拖动手柄（9..11）优先：鼠标落在 pad 的投影四边形内就直接返回，免得 pad
-    // 靠内的那个角被沿途的箭头抢走。投影几乎侧对相机（面积太小）时跳过，不抢点击。
-    for (int p = 0; p < kPlaneHandleCount; ++p) {
-        const int handle = kPlaneHandleBase + p;
-        const QVector3D u = gizmoAxisVec(planeAxisA(handle));
-        const QVector3D v = gizmoAxisVec(planeAxisB(handle));
-        const QVector3D padC = c + (u + v) * (m_gizmo.size * kPlaneOffsetScale);
-        const float half = m_gizmo.size * kPlaneHalfScale;
-        const QVector3D corner[4] = { padC + (u + v) * half, padC + (u - v) * half,
-                                      padC - (u + v) * half, padC + (v - u) * half };
-        QPointF quad[4];
-        bool ok = true;
-        for (int i = 0; i < 4 && ok; ++i)
-            quad[i] = worldToScreen(vp, corner[i], w, h, &ok);
-        if (ok && quadAreaPx(quad) > kPlaneMinAreaPx2 && pointInQuad(mouse, quad))
-            return handle;
-    }
-
-    // 平移箭头（0..5）：投影线段 [根部, 尖端] 到鼠标的像素距离。线段只覆盖箭头
-    // 自身（根部在 TCP 中心，所以中心附近可点中的就是最近的那根箭头）。
-    for (int handle = 0; handle < kTranslateHandleCount; ++handle) {
-        bool okR = false, okT = false;
-        const QVector3D dir = gizmoHandleDir(handle);
-        const QPointF a = worldToScreen(vp, c + dir * arrowRoot, w, h, &okR);
-        const QPointF b = worldToScreen(vp, c + dir * arrowTip, w, h, &okT);
-        if (!okR || !okT) continue;
-        const float d = pointSegmentDistance(mouse, a, b);
-        if (d < best) { best = d; bestHandle = handle; }
-    }
-
-    // 旋转环（6..8）：投影环的采样折线，取到鼠标的最近像素距离。
-    for (int axis = 0; axis < 3; ++axis) {
-        QVector3D e1, e2;
-        gizmoPlaneBasis(axis, e1, e2);
-        QPointF prev;
-        bool havePrev = false;
-        float dmin = std::numeric_limits<float>::max();
-        for (int i = 0; i <= kRingSegments; ++i) {
-            const float t = float(i) / float(kRingSegments) * kTwoPi;
-            bool okp = false;
-            const QPointF sp = worldToScreen(vp, c + ringR * (std::cos(t) * e1 + std::sin(t) * e2),
-                                             w, h, &okp);
-            if (okp && havePrev) dmin = std::min(dmin, pointSegmentDistance(mouse, prev, sp));
-            prev = sp;
-            havePrev = okp;
-        }
-        if (dmin < best) { best = dmin; bestHandle = kHandleRingBase + axis; }
-    }
-    return bestHandle;
-}
-
 // --------------------------------------------------------------- 公共 API ----
 void MujocoQuickItem::setGizmoVisible(bool visible) {
     bool changed = false;
     if (m_sim) {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
-        if (m_gizmo.visible != visible) {
-            m_gizmo.visible = visible;
+        if (m_gizmo.setVisible(visible)) {
             changed = true;
-            if (!visible) {
-                m_gizmo.dragging = false;
-                m_gizmo.active = -1;
-                m_gizmo.hovered = -1;
-            } else if (m_sim->m_ && m_sim->d_) {
-                updateGizmoPoseFromSiteLocked(m_sim->m_, m_sim->d_);
+            if (visible && m_sim->m_ && m_sim->d_) {
+                m_gizmo.updatePoseFromSite(m_sim->m_, m_sim->d_);
+                // 恒定屏幕尺寸：先把生效尺寸算对再重建 geom，否则第一帧是旧大小。
+                QMatrix4x4 vp; QVector3D camPos;
+                if (buildGizmoCameraLocked(vp, camPos))
+                    m_gizmo.updateEffectiveSize(vp, camPos, float(width()), float(height()));
             }
             rebuildTrajectoryGeomsLocked();
         }
-    } else if (m_gizmo.visible != visible) {
-        m_gizmo.visible = visible;
+    } else if (m_gizmo.setVisible(visible)) {
         changed = true;
     }
     if (changed) {
@@ -1929,57 +1555,81 @@ void MujocoQuickItem::setGizmoToolAligned(bool aligned) {
     bool changed = false;
     if (m_sim) {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
-        if (m_gizmo.toolAligned != aligned) {
-            m_gizmo.toolAligned = aligned;
+        if (m_gizmo.setToolAligned(aligned)) {
             changed = true;
             rebuildTrajectoryGeomsLocked();
         }
-    } else if (m_gizmo.toolAligned != aligned) {
-        m_gizmo.toolAligned = aligned;
-        changed = true;
+    } else {
+        changed = m_gizmo.setToolAligned(aligned);
     }
     if (changed) { requestRenderUpdate(); emit gizmoToolAlignedChanged(); }
 }
 
 void MujocoQuickItem::setGizmoTrackedSite(const QString& siteName) {
-    const QString s = siteName.trimmed();
-    if (s.isEmpty()) return;
     if (m_sim) {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
-        m_gizmo.siteName = s;
-        m_gizmo.siteId = -1;
-        m_gizmo.poseValid = false;
-        if (m_gizmo.visible && m_sim->m_ && m_sim->d_)
-            updateGizmoPoseFromSiteLocked(m_sim->m_, m_sim->d_);
+        if (!m_gizmo.setTrackedSite(siteName)) return;
+        if (m_gizmo.visible() && m_sim->m_ && m_sim->d_)
+            m_gizmo.updatePoseFromSite(m_sim->m_, m_sim->d_);
         rebuildTrajectoryGeomsLocked();
     } else {
-        m_gizmo.siteName = s;
+        m_gizmo.setTrackedSite(siteName);
     }
     requestRenderUpdate();
 }
 
 void MujocoQuickItem::setGizmoSize(double worldSize) {
-    const float s = std::clamp(float(worldSize), 0.01f, 2.0f);
     if (m_sim) {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
-        if (qFuzzyCompare(m_gizmo.size, s)) return;
-        m_gizmo.size = s;
+        m_gizmo.setWorldSize(float(worldSize));
         rebuildTrajectoryGeomsLocked();
     } else {
-        m_gizmo.size = s;
+        m_gizmo.setWorldSize(float(worldSize));
     }
     requestRenderUpdate();
+}
+
+void MujocoQuickItem::setGizmoConstantScreenSize(bool on) {
+    if (!m_gizmo.setConstantScreenSize(on)) return;
+    if (m_sim) {
+        std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+        QMatrix4x4 vp; QVector3D camPos;
+        const bool sizeChanged = buildGizmoCameraLocked(vp, camPos)
+            && m_gizmo.updateEffectiveSize(vp, camPos, float(width()), float(height()));
+        if (sizeChanged) rebuildTrajectoryGeomsLocked();
+    }
+    requestRenderUpdate();
+    emit gizmoConstantScreenSizeChanged();
+}
+
+void MujocoQuickItem::setGizmoScreenSizePx(double px) {
+    if (!m_gizmo.setScreenSizePx(px)) return;
+    if (m_sim) {
+        std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+        QMatrix4x4 vp; QVector3D camPos;
+        const bool sizeChanged = buildGizmoCameraLocked(vp, camPos)
+            && m_gizmo.updateEffectiveSize(vp, camPos, float(width()), float(height()));
+        if (sizeChanged) rebuildTrajectoryGeomsLocked();
+    }
+    requestRenderUpdate();
+    emit gizmoScreenSizePxChanged();
+}
+
+void MujocoQuickItem::setGizmoAlwaysOnTop(bool on) {
+    if (!m_gizmo.setAlwaysOnTop(on)) return;
+    // 切换后重建：on→线段挪到 overlay 且撤出 user_scn，off→反之。
+    if (m_sim) {
+        std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+        rebuildTrajectoryGeomsLocked();
+    }
+    requestRenderUpdate();
+    emit gizmoAlwaysOnTopChanged();
 }
 
 void MujocoQuickItem::reportGizmoEditSolvable(bool solvable) {
     if (!m_sim) return;
     std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
-    if (!m_gizmo.dragging) return;
-    m_gizmo.lastSolvable = solvable;
-    if (solvable) {
-        m_gizmo.solvablePos = m_gizmo.pos;
-        m_gizmo.solvableOri = m_gizmo.ori;
-    }
+    m_gizmo.reportSolvable(solvable);
 }
 
 // -------------------------------------------------------------- 交互处理 ----
@@ -1988,32 +1638,10 @@ bool MujocoQuickItem::gizmoHandleMousePress(const QPointF& pos) {
     bool consumed = false;
     {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
-        if (!m_gizmo.visible || !m_gizmo.poseValid) return false;
+        if (!m_gizmo.visible() || !m_gizmo.poseValid()) return false;
         QMatrix4x4 vp; QVector3D camPos;
         if (!buildGizmoCameraLocked(vp, camPos)) return false;
-        const int handle = gizmoHitTest(pos, vp);
-        if (handle < 0) return false;
-        m_gizmo.dragging = true;
-        if (handle < gizmo_detail::kTranslateHandleCount) {       // 平移箭头
-            m_gizmo.dragMode  = 0;
-            m_gizmo.dragAxis  = gizmo_detail::handleAxis(handle);
-            m_gizmo.dragAxisB = 0;
-        } else if (handle < gizmo_detail::kPlaneHandleBase) {     // 旋转环
-            m_gizmo.dragMode  = 1;
-            m_gizmo.dragAxis  = gizmo_detail::handleAxis(handle);
-            m_gizmo.dragAxisB = 0;
-        } else {                                                   // 平面拖动
-            m_gizmo.dragMode  = 2;
-            m_gizmo.dragAxis  = gizmo_detail::planeAxisA(handle);
-            m_gizmo.dragAxisB = gizmo_detail::planeAxisB(handle);
-        }
-        m_gizmo.dragSign = gizmo_detail::handleSign(handle);
-        m_gizmo.active = handle;
-        m_gizmo.hovered = handle;
-        m_gizmo.lastMouse = pos;
-        m_gizmo.solvablePos = m_gizmo.pos;
-        m_gizmo.solvableOri = m_gizmo.ori;
-        m_gizmo.lastSolvable = true;
+        if (!m_gizmo.press(pos, vp, float(width()), float(height()))) return false;
         rebuildTrajectoryGeomsLocked();
         consumed = true;
     }
@@ -2027,87 +1655,14 @@ bool MujocoQuickItem::gizmoHandleMouseMove(const QPointF& pos) {
     QVector3D emitPos; QQuaternion emitOri; bool doEmit = false;
     {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
-        if (!m_gizmo.dragging) return false;
+        if (!m_gizmo.dragging()) return false;
         QMatrix4x4 vp; QVector3D camPos;
-        if (!buildGizmoCameraLocked(vp, camPos)) { m_gizmo.lastMouse = pos; return true; }
-
-        const QVector3D axisVec = gizmoAxisVec(m_gizmo.dragAxis);
-        const float w = float(width());
-        const float h = float(height());
-        QVector3D candPos = m_gizmo.pos;
-        QQuaternion candOri = m_gizmo.ori;
-
-        if (m_gizmo.dragMode == 0) {
-            // 平移：把鼠标位移投影到屏幕上的手柄方向（含正负号），换算成世界位移。
-            // 参考点取箭头自身（根部/尖端），投影比例就在箭头所在位置处量取。
-            const QVector3D a = axisVec * float(m_gizmo.dragSign);
-            const float r0 = m_gizmo.size * gizmo_detail::kArrowStartScale;
-            const float r1 = m_gizmo.size * gizmo_detail::kArrowTipScale;
-            const float L = r1 - r0;
-            bool ok1 = false, ok2 = false;
-            const QPointF s0 = gizmo_detail::worldToScreen(vp, m_gizmo.pos + a * r0, w, h, &ok1);
-            const QPointF s1 = gizmo_detail::worldToScreen(vp, m_gizmo.pos + a * r1, w, h, &ok2);
-            if (ok1 && ok2) {
-                QVector2D dir(float(s1.x() - s0.x()), float(s1.y() - s0.y()));
-                const float len = dir.length();
-                if (len > 1e-3f) {
-                    dir /= len;
-                    const QVector2D md(float(pos.x() - m_gizmo.lastMouse.x()),
-                                       float(pos.y() - m_gizmo.lastMouse.y()));
-                    const float screenMove = QVector2D::dotProduct(md, dir);
-                    candPos = m_gizmo.pos + a * (screenMove * (L / len));
-                }
-            }
-        } else if (m_gizmo.dragMode == 2) {
-            // 平面拖动：把鼠标位移分解到平面内两个轴的屏幕方向（解 2×2 线性方程）。
-            // 两个屏幕方向近乎平行时方程组病态，直接不产生位移。
-            const QVector3D u = gizmoAxisVec(m_gizmo.dragAxis);
-            const QVector3D v = gizmoAxisVec(m_gizmo.dragAxisB);
-            bool ok0 = false, ok1 = false, ok2 = false;
-            const QPointF s0 = gizmo_detail::worldToScreen(vp, m_gizmo.pos, w, h, &ok0);
-            // 参考点取单位长度（1 米）：pu/pv 就是"每米对应多少像素"
-            const QPointF su = gizmo_detail::worldToScreen(vp, m_gizmo.pos + u, w, h, &ok1);
-            const QPointF sv = gizmo_detail::worldToScreen(vp, m_gizmo.pos + v, w, h, &ok2);
-            if (ok0 && ok1 && ok2) {
-                const QVector2D pu(float(su.x() - s0.x()), float(su.y() - s0.y()));
-                const QVector2D pv(float(sv.x() - s0.x()), float(sv.y() - s0.y()));
-                const float det   = pu.x() * pv.y() - pu.y() * pv.x();
-                const float scale = pu.length() * pv.length();
-                if (scale > 1e-6f && std::abs(det) / scale > gizmo_detail::kPlaneMinSinPx) {
-                    const float dx = float(pos.x() - m_gizmo.lastMouse.x());
-                    const float dy = float(pos.y() - m_gizmo.lastMouse.y());
-                    const float dA = (dx * pv.y() - dy * pv.x()) / det;   // 单位：米
-                    const float dB = (pu.x() * dy - pu.y() * dx) / det;
-                    candPos = m_gizmo.pos + u * dA + v * dB;
-                }
-            }
-        } else {
-            // 旋转：鼠标相对屏幕投影中心的转角，方向按轴是否朝向相机翻转。
-            bool ok = false;
-            const QPointF cc = gizmo_detail::worldToScreen(vp, m_gizmo.pos, w, h, &ok);
-            if (ok) {
-                const QVector2D v0(float(m_gizmo.lastMouse.x() - cc.x()),
-                                   float(m_gizmo.lastMouse.y() - cc.y()));
-                const QVector2D v1(float(pos.x() - cc.x()), float(pos.y() - cc.y()));
-                if (v0.length() > 1e-3f && v1.length() > 1e-3f) {
-                    const float a0 = std::atan2(v0.y(), v0.x());
-                    const float a1 = std::atan2(v1.y(), v1.x());
-                    const float facing = QVector3D::dotProduct(axisVec, (m_gizmo.pos - camPos));
-                    const float sign = (facing > 0.0f) ? 1.0f : -1.0f;
-                    const float deg = float(qRadiansToDegrees(double(a1 - a0))) * sign;
-                    candOri = QQuaternion::fromAxisAndAngle(axisVec, deg) * m_gizmo.ori;
-                }
-            }
-        }
-
-        m_gizmo.pos = candPos;
-        m_gizmo.ori = candOri;
-        m_gizmo.lastMouse = pos;
-        m_gizmo.lastSolvable = true;
+        if (!buildGizmoCameraLocked(vp, camPos)) { m_gizmo.setLastMouse(pos); return true; }
+        bool poseEdited = false;
+        m_gizmo.move(pos, vp, camPos, float(width()), float(height()),
+                     emitPos, emitOri, poseEdited);
         rebuildTrajectoryGeomsLocked();
-        emitPos = candPos;
-        emitOri = candOri;
-        doEmit = true;
+        doEmit = poseEdited;
     }
     if (doEmit) {
         // 上层在此槽内同步做 IK 并回调 reportGizmoEditSolvable()。
@@ -2122,17 +1677,8 @@ bool MujocoQuickItem::gizmoHandleMouseRelease() {
     bool wasDragging = false;
     {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
-        if (!m_gizmo.dragging) return false;
+        if (!m_gizmo.release()) return false;
         wasDragging = true;
-        m_gizmo.dragging = false;
-        m_gizmo.active = -1;
-        m_gizmo.hovered = -1;
-        // 机器人跟不到位（IK 不可解）时，松手把手柄弹回最近一次可解的位姿。
-        if (!m_gizmo.lastSolvable) {
-            m_gizmo.pos = m_gizmo.solvablePos;
-            m_gizmo.ori = m_gizmo.solvableOri;
-        }
-        m_gizmo.lastSolvable = true;
         rebuildTrajectoryGeomsLocked();
     }
     requestRenderUpdate();
@@ -2145,19 +1691,10 @@ void MujocoQuickItem::gizmoUpdateHover(const QPointF& pos) {
     bool changed = false;
     {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
-        int want = m_gizmo.hovered;
-        if (!m_gizmo.visible || m_gizmo.dragging || !m_gizmo.poseValid) {
-            want = -1;
-        } else {
-            QMatrix4x4 vp; QVector3D camPos;
-            if (buildGizmoCameraLocked(vp, camPos))
-                want = gizmoHitTest(pos, vp);
-        }
-        if (want != m_gizmo.hovered) {
-            m_gizmo.hovered = want;
-            rebuildTrajectoryGeomsLocked();
-            changed = true;
-        }
+        QMatrix4x4 vp; QVector3D camPos;
+        if (!buildGizmoCameraLocked(vp, camPos)) return;  // 无相机：保持当前高亮不变
+        changed = m_gizmo.updateHover(pos, vp, float(width()), float(height()));
+        if (changed) rebuildTrajectoryGeomsLocked();
     }
     if (changed) requestRenderUpdate();
 }
@@ -2403,7 +1940,8 @@ QVariantList MujocoQuickItem::pointCloudPoints(int cloudId) const {
     return result;
 }
 
-// 渲染线程：把点云用 GL_POINTS 画进 MuJoCo 离屏 FBO（共享深度，正确互遮挡）。
+// 渲染线程：把点云用 GL_POINTS 画进 MuJoCo 离屏 FBO（共享深度，正确互遮挡），
+// 并把 always-on-top 的 gizmo 线框用关掉深度的叠加层画在最前。
 void MujocoQuickItem::onRenderOverlay(unsigned int targetFbo, int viewWidth, int viewHeight) {
     if (!m_sim || viewWidth <= 0 || viewHeight <= 0) return;
 
@@ -2416,32 +1954,39 @@ void MujocoQuickItem::onRenderOverlay(unsigned int targetFbo, int viewWidth, int
         std::lock_guard<std::mutex> lk(m_pointCloudMtx);
         if (m_pointClouds.empty()) {
             if (m_pointRenderer) m_pointRenderer->retainOnly({});
-            return;
-        }
-        if (!m_pointRenderer) m_pointRenderer.reset(new PointCloudRenderer());
-        ids.reserve(m_pointClouds.size());
-        draws.reserve(m_pointClouds.size());
-        for (PointCloudState& pc : m_pointClouds) {
-            ids.push_back(pc.id);
-            if (pc.dirtyPositions) {
-                const int count = static_cast<int>(pc.positions.size() / 3);
-                m_pointRenderer->uploadPositions(pc.id, pc.positions.data(), count);
-                pc.dirtyPositions = false;
+        } else {
+            if (!m_pointRenderer) m_pointRenderer.reset(new PointCloudRenderer());
+            ids.reserve(m_pointClouds.size());
+            draws.reserve(m_pointClouds.size());
+            for (PointCloudState& pc : m_pointClouds) {
+                ids.push_back(pc.id);
+                if (pc.dirtyPositions) {
+                    const int count = static_cast<int>(pc.positions.size() / 3);
+                    m_pointRenderer->uploadPositions(pc.id, pc.positions.data(), count);
+                    pc.dirtyPositions = false;
+                }
+                if (pc.dirtyColors) {
+                    const int ccount = static_cast<int>(pc.colors.size() / 4);
+                    m_pointRenderer->uploadColors(
+                        pc.id, pc.colors.empty() ? nullptr : pc.colors.data(), ccount);
+                    pc.dirtyColors = false;
+                }
+                draws.push_back({pc.id, pc.style, pc.pointSize, pc.rgba, pc.visible,
+                                 pc.groundReflection, pc.reflectionPlaneZ,
+                                 pc.reflectionIntensity});
+                if (pc.visible && !pc.positions.empty()) anyVisible = true;
             }
-            if (pc.dirtyColors) {
-                const int ccount = static_cast<int>(pc.colors.size() / 4);
-                m_pointRenderer->uploadColors(
-                    pc.id, pc.colors.empty() ? nullptr : pc.colors.data(), ccount);
-                pc.dirtyColors = false;
-            }
-            draws.push_back({pc.id, pc.style, pc.pointSize, pc.rgba, pc.visible,
-                             pc.groundReflection, pc.reflectionPlaneZ,
-                             pc.reflectionIntensity});
-            if (pc.visible && !pc.positions.empty()) anyVisible = true;
+            m_pointRenderer->retainOnly(ids);
         }
-        m_pointRenderer->retainOnly(ids);
     }
-    if (!anyVisible) return;
+
+    // gizmo always-on-top 线段（从 DragTeachGizmo 拷出一份，绘制时不持锁）。
+    std::vector<DragTeachGizmo::LineBatch> gizmoLines;
+    if (m_gizmo.alwaysOnTop())
+        gizmoLines = m_gizmo.overlayLinesCopy();
+
+    if (!anyVisible && gizmoLines.empty()) return;
+    if (!m_pointRenderer) m_pointRenderer.reset(new PointCloudRenderer());
 
     // 相机：与 mjr_render 的 setView 一致，mono 取 camera[0]/camera[1] 的平均。
     const mjvScene& scn = m_sim->scn;
@@ -2467,6 +2012,12 @@ void MujocoQuickItem::onRenderOverlay(unsigned int targetFbo, int viewWidth, int
     for (const DrawItem& it : draws) {
         if (!it.visible) continue;
         m_pointRenderer->drawCloud(it.id, it.style, it.size, it.color);
+    }
+    // gizmo 最后画、且关掉深度测试 → 永远盖在场景（含点云）之上。
+    for (const DragTeachGizmo::LineBatch& b : gizmoLines) {
+        m_pointRenderer->drawLines(b.xyz.data(), b.rgba.data(),
+                                   static_cast<int>(b.xyz.size() / 3),
+                                   b.widthPx, /*depthTest=*/false);
     }
     m_pointRenderer->endFrame();
 }
@@ -4586,10 +4137,20 @@ void MujocoQuickItem::onFrameRendered() {
             sampleTrackedTrajectoriesLocked(m_sim->m_, m_sim->d_);
             // 拖动示教 gizmo：可见且非拖动时跟随 TCP 位姿（关节可能被
             // 脚本/UI 其它路径改变），变化时重建 gizmo geom。
-            if (m_gizmo.visible && !m_gizmo.dragging &&
-                updateGizmoPoseFromSiteLocked(m_sim->m_, m_sim->d_)) {
-                rebuildTrajectoryGeomsLocked();
+            bool gizmoDirty = false;
+            if (m_gizmo.visible() && !m_gizmo.dragging() &&
+                m_gizmo.updatePoseFromSite(m_sim->m_, m_sim->d_)) {
+                gizmoDirty = true;
             }
+            // 尺寸：恒定屏幕尺寸模式下相机一拉远/拉近就得重算世界尺寸（gizmo 自身
+            // 深度变化也同理），变了同样要重建 geom。
+            if (m_gizmo.visible()) {
+                QMatrix4x4 vp; QVector3D camPos;
+                if (buildGizmoCameraLocked(vp, camPos) &&
+                    m_gizmo.updateEffectiveSize(vp, camPos, float(width()), float(height())))
+                    gizmoDirty = true;
+            }
+            if (gizmoDirty) rebuildTrajectoryGeomsLocked();
         }
         // TCP 坐标读数：投影到 item 逻辑像素坐标（由内置绘制子项用矢量字体画）
         tcpValid = sampleGizmoReadoutLocked(tcpWorld, tcpPos);
@@ -4629,11 +4190,7 @@ void MujocoQuickItem::onFrameRendered() {
             simRunChanged = true;
         }
         // 无论从哪条路径开始运行（空格键 / MuJoCo UI / 属性），都自动隐藏拖动示教 gizmo。
-        if (simRunning && m_gizmo.visible) {
-            m_gizmo.visible = false;
-            m_gizmo.dragging = false;
-            m_gizmo.active = -1;
-            m_gizmo.hovered = -1;
+        if (simRunning && m_gizmo.setVisible(false)) {
             rebuildTrajectoryGeomsLocked();
             gizmoHidden = true;
         }
@@ -4663,15 +4220,17 @@ void MujocoQuickItem::onFrameRendered() {
         m_gizmoPosValid = tcpValid;
         if (tcpValid) m_gizmoPosWorld = tcpWorld;
         const QString tcpText = tcpValid ? formatGizmoPosText(tcpWorld) : QString();
+        bool panelDirty = false;
         if (m_gizmoPosText != tcpText) {
             m_gizmoPosText = tcpText;
             emit gizmoPosTextChanged();
+            panelDirty = true;
         }
         if (m_gizmoPosScreen != tcpPos) {
             m_gizmoPosScreen = tcpPos;
             emit gizmoPosScreenChanged();
         }
-        // 关节实时值面板：名字与值都没变就不动 —— 否则每帧重排+重建纹理，
+        // 关节实时值：名字与值都没变就不动 —— 否则每帧重排+重建纹理，
         // 机械臂静止时白掉帧。
         if (!sameStringList(jointNames, m_jointNames) ||
             !sameDoubleList(jointValues, m_jointValues)) {
@@ -4683,9 +4242,10 @@ void MujocoQuickItem::onFrameRendered() {
                 m_jointsText = jt;
                 emit jointsReadoutTextChanged();
             }
-            updateJointsReadoutItem();
+            panelDirty = true;
         }
-        // 内置绘制（GUI 线程）
+        // 右上角面板（TCP + 关节）：TCP 或关节变了都刷一次。
+        if (panelDirty) updateJointsReadoutItem();
         updateReadoutItem();
         update();
     }, Qt::QueuedConnection);

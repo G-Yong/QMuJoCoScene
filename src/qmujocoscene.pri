@@ -3,6 +3,7 @@ HEADERS += \
     $$PWD/QtPlatformUIAdapter.h \
     $$PWD/MujocoQuickItem.h \
     $$PWD/MujocoQuickItemHelpers.h \
+    $$PWD/DragTeachGizmo.h \
     $$PWD/PointCloudRenderer.h \
     $$PWD/simulationtypes.h \
     $$PWD/lodepng.h
@@ -10,6 +11,7 @@ HEADERS += \
 SOURCES += \
     $$PWD/QtPlatformUIAdapter.cpp \
     $$PWD/PointCloudRenderer.cpp \
+    $$PWD/DragTeachGizmo.cpp \
     $$PWD/MujocoQuickItem.cpp
 
 # Quick / QML 集成需要 quick 模块

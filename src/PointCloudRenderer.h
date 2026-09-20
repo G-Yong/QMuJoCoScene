@@ -79,6 +79,12 @@ public:
                             const QVector4D& uniformColor,
                             float planeZ, float alphaScale);
 
+    // 绘制一批彩色 3D 线段（GL_LINES，xyz/rgba 各按顶点扁平，vertexCount 为顶点数）。
+    // widthPx = 线宽像素；depthTest=false 时关闭深度测试/写入 → 永远画在最前（gizmo 用）。
+    // 复用 beginFrame() 已设好的 view/proj，须在 beginFrame 与 endFrame 之间调用。
+    void drawLines(const float* xyz, const float* rgba, int vertexCount,
+                   float widthPx, bool depthTest);
+
     // 结束一帧：恢复必要的 GL 状态（解绑 program / VAO）。
     void endFrame();
 
@@ -100,6 +106,8 @@ private:
 
     bool ensureProgram();
     GpuCloud& ensureCloud(int cloudId);
+    // 惰性创建线段渲染的 shader / VAO / VBO（首次 drawLines 时）。
+    bool ensureLineProgram();
 
     // 反射遮挡：把 MuJoCo 场景深度按平面镜像散射成"倒影遮挡深度"纹理，
     // 供 drawCloudReflected 在片元里做深度比较，实现点云倒影被物体倒影遮挡。
@@ -128,6 +136,13 @@ private:
     QOpenGLShaderProgram* m_scatterProg = nullptr;  // 场景深度 → 镜像遮挡深度散射
     QOpenGLShaderProgram* m_resolveProg = nullptr;  // MS 深度 → 单采样深度解析
     bool m_scatterUsesMS = false;                   // scatter 着色器是否读 MS 深度
+
+    // 线段渲染（gizmo 叠加层）：独立 program + 动态 VBO。
+    QOpenGLShaderProgram* m_lineProg   = nullptr;
+    unsigned int          m_lineVao    = 0;
+    unsigned int          m_linePosVbo = 0;
+    unsigned int          m_lineColVbo = 0;
+    int                   m_locLineMVP = -1;
 
     unsigned int m_dummyVao = 0;         // scatter / 全屏解析用的空 VAO
 

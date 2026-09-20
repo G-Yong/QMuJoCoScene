@@ -43,6 +43,7 @@
 #include <vector>
 
 #include "IMujocoHost.h"
+#include "DragTeachGizmo.h"
 #include "simulationtypes.h"
 
 class QOpenGLContext;
@@ -99,6 +100,17 @@ class MUJOCOQUICKITEM_EXPORT MujocoQuickItem : public QQuickFramebufferObject, p
     Q_PROPERTY(bool gizmoDragging READ gizmoDragging NOTIFY gizmoDraggingChanged)
     // gizmo 手柄对齐坐标系：false=世界坐标轴（默认），true=工具坐标系（跟随 TCP 姿态）。
     Q_PROPERTY(bool gizmoToolAligned READ gizmoToolAligned WRITE setGizmoToolAligned NOTIFY gizmoToolAlignedChanged)
+    // gizmo 恒定屏幕尺寸：true（默认）= 相机拉远/拉近时自动换算 world 尺寸，屏幕上看起来
+    // 大小不变（**最大的旋转环**直径恒为 gizmoScreenSizePx 像素）；false = 用 setGizmoSize()
+    // 给的固定世界尺寸（拉近就变大、拉远就变小，远了会看不清）。
+    Q_PROPERTY(bool gizmoConstantScreenSize READ gizmoConstantScreenSize WRITE setGizmoConstantScreenSize NOTIFY gizmoConstantScreenSizeChanged)
+    // 恒定屏幕尺寸下 gizmo 的屏幕跨度（像素）：取三个旋转环里投影最大的那个，其椭圆长轴
+    //（即直径）恒为这个值。单位是 item 逻辑像素，与命中测试同一坐标系。默认 120。
+    Q_PROPERTY(double gizmoScreenSizePx READ gizmoScreenSizePx WRITE setGizmoScreenSizePx NOTIFY gizmoScreenSizePxChanged)
+    // gizmo 一直显示在最前面：true（默认）= gizmo 的线框画在所有物体之上、不被遮挡
+    //（画进 user_scn 的副本被撤下，改由一个关掉深度测试的叠加层绘制）；false = 和普通
+    // 几何一样参与深度、会被前景物体挡住。仅线框模式（kGizmoWireframe，默认开）下生效。
+    Q_PROPERTY(bool gizmoAlwaysOnTop READ gizmoAlwaysOnTop WRITE setGizmoAlwaysOnTop NOTIFY gizmoAlwaysOnTopChanged)
     // TCP 坐标读数：**默认由本类内置绘制**（见下面 gizmoReadout* 系列），不需要 QML
     // 参与。这两个属性把「文本 + 屏幕位置」另外暴露出去，给想自己渲染（或另作它用）
     // 的上层用，不用可以忽略。
@@ -332,11 +344,11 @@ public:
     // 不参与物理/存档；仿真开始运行时自动隐藏。手柄默认只跟随 TCP 位置移动、
     // 与世界轴对齐（rviz 交互标记风格）；gizmoToolAligned=true 时改为跟随 TCP
     // 姿态旋转（工具坐标系）。
-    bool gizmoVisible() const { return m_gizmo.visible; }
+    bool gizmoVisible() const { return m_gizmo.visible(); }
     void setGizmoVisible(bool visible);
-    bool gizmoDragging() const { return m_gizmo.dragging; }
+    bool gizmoDragging() const { return m_gizmo.dragging(); }
     // 手柄对齐：false=世界轴（默认），true=工具坐标系（手柄随 TCP 姿态旋转）。
-    bool gizmoToolAligned() const { return m_gizmo.toolAligned; }
+    bool gizmoToolAligned() const { return m_gizmo.toolAligned(); }
     void setGizmoToolAligned(bool aligned);
     // TCP 坐标读数（按 gizmoReadoutMillimeters 选单位；文本里可能含 '\n'）与它在
     // item 逻辑像素坐标里的位置。
@@ -365,7 +377,17 @@ public:
     // 设定 gizmo 跟踪的 site 名（默认 "tcp"）。
     Q_INVOKABLE void setGizmoTrackedSite(const QString& siteName);
     // gizmo 手柄的世界尺寸（米），影响箭头长度/环半径与命中判定。
+    // ⚠️ 只在 gizmoConstantScreenSize=false 时生效；恒定屏幕尺寸模式下改
+    //    gizmoScreenSizePx（世界尺寸每帧按相机距离换算，这个值只被记下来备用）。
     Q_INVOKABLE void setGizmoSize(double worldSize);
+    // 恒定屏幕尺寸开关与屏幕跨度（像素）。
+    bool   gizmoConstantScreenSize() const { return m_gizmo.constantScreenSize(); }
+    void   setGizmoConstantScreenSize(bool on);
+    double gizmoScreenSizePx() const { return m_gizmo.screenSizePx(); }
+    void   setGizmoScreenSizePx(double px);
+    // gizmo 是否一直显示在最前面（不被物体遮挡），默认 true。
+    bool   gizmoAlwaysOnTop() const { return m_gizmo.alwaysOnTop(); }
+    void   setGizmoAlwaysOnTop(bool on);
     // 上层在 gizmoPoseEdited() 槽内回调：报告刚给出的位姿 IK 是否可解。
     // 不可解不会打断拖动（手柄始终跟手），只决定松手时 gizmo 回弹到哪。
     Q_INVOKABLE void reportGizmoEditSolvable(bool solvable);
@@ -850,6 +872,9 @@ signals:
     void gizmoVisibleChanged();
     void gizmoDraggingChanged();
     void gizmoToolAlignedChanged();
+    void gizmoConstantScreenSizeChanged();
+    void gizmoScreenSizePxChanged();
+    void gizmoAlwaysOnTopChanged();
     void gizmoPosTextChanged();
     void gizmoPosScreenChanged();
     void gizmoReadoutMillimetersChanged();
@@ -1056,36 +1081,10 @@ private:
     std::vector<TrajectoryState> m_trajectories;
     int                          m_nextTrajectoryId = 1;
 
-    // ------------------------------------------------------------------
-    // 拖动示教 gizmo 状态（全部受 m_sim->mtx 保护：GUI 线程的鼠标处理与渲染
-    // 线程的 onFrameRendered 都会读写）。geom 段紧跟在轨迹段之后（tail），
-    // geomStart 在每次 rebuildTrajectoryGeomsLocked 末尾更新为轨迹段结束下标。
-    // handle 索引：0..5 = 平移箭头（每个轴一对，先负后正：0=-X 1=+X 2=-Y
-    // 3=+Y 4=-Z 5=+Z）；6..8 = 旋转 X/Y/Z 环；9..11 = 平面拖动 XY/YZ/ZX。
-    // ------------------------------------------------------------------
-    struct GizmoState {
-        bool        visible = false;
-        QString     siteName = QStringLiteral("tcp");
-        int         siteId = -1;
-        bool        poseValid = false;
-        QVector3D   pos;                 // 世界位置（米）
-        QQuaternion ori;                 // 世界姿态
-        float       size = 0.12f;        // 手柄世界尺寸（米）
-        int         hovered = -1;
-        int         active = -1;
-        bool        dragging = false;
-        int         dragMode = 0;        // 0=平移 1=旋转 2=平面
-        int         dragAxis = 0;        // 0=X 1=Y 2=Z（平面模式 = 平面内第一根轴）
-        int         dragAxisB = 0;       // 平面模式：平面内第二根轴
-        int         dragSign = 1;        // 平移方向：-1=负向箭头，+1=正向箭头
-        bool        toolAligned = false; // false=世界轴对齐，true=工具坐标系对齐
-        QPointF     lastMouse;
-        QVector3D   solvablePos;         // 最近一次 IK 可解的位姿
-        QQuaternion solvableOri;
-        bool        lastSolvable = true;
-        int         geomStart = 0;
-        int         geomCount = 0;
-    } m_gizmo;
+    // 拖动示教 gizmo：状态 + 几何 + 命中 + 拖动数学都在 DragTeachGizmo（见该类）。
+    // 本类只做编排：持 m_sim->mtx 后驱动它、用 scn 相机构造 viewProj 传进去、把它的
+    // 叠加层线段交给渲染线程画、并把 QML 属性/信号转接过去。
+    DragTeachGizmo m_gizmo;
 
     // TCP 坐标读数：渲染线程在 onFrameRendered 里只做锁内采样（世界坐标 + 屏幕位置），
     // 经 queued lambda 到 GUI 线程格式化成 m_gizmoPosText / m_gizmoPosScreen 并发信号
@@ -1148,20 +1147,15 @@ private:
     PointCloudState*       findPointCloud(int cloudId);
     const PointCloudState* findPointCloud(int cloudId) const;
 
-    // 必须在 m_sim->mtx 锁内调用：把 m_userScene 尾部的轨迹段全部重建。
+    // 必须在 m_sim->mtx 锁内调用：把 m_userScene 尾部的轨迹段全部重建
+    //（末尾再让 m_gizmo.rebuildGeoms 追加 gizmo 段并写 ngeom）。
     void rebuildTrajectoryGeomsLocked();
-    // 必须在 m_sim->mtx 锁内调用：在 startIndex 处追加 gizmo 的 geom 段并写 ngeom。
-    // 不可见时只把 ngeom 收回到 startIndex（不画）。
-    void rebuildGizmoGeomsLocked(int startIndex);
-    // 必须在 m_sim->mtx 锁内调用：按当前 m,d 读取跟踪 site 的世界位姿刷新 gizmo
-    // 位姿（仅在可见且非拖动时）。返回位姿是否发生变化（需要重建 geom）。
-    bool updateGizmoPoseFromSiteLocked(const mjModel* m, const mjData* d);
     // 在 m_sim->mtx 锁内调用：由 scn 相机构造 view*proj 矩阵（视口取 width()/height()），
     // 并输出世界相机位置。返回 false 表示相机/尺寸不可用。
+    // 与 render_gl3.c 的 setView() 对齐：左右边界按 frustum_top/bottom × 宽高比展开
+    //（mjvGLCamera::frustum_width 注释就是 "not used for rendering"），并叠加
+    // scn.translate/rotate/scale 这个场景变换（enabletransform 打开时）。
     bool buildGizmoCameraLocked(QMatrix4x4& viewProj, QVector3D& camPos) const;
-    // 屏幕空间命中测试：返回手柄索引（0..5 平移 ±XYZ，6..8 旋转 XYZ，
-    // 9..11 平面 XY/YZ/ZX），未命中返回 -1。平面手柄优先于箭头/环。
-    int  gizmoHitTest(const QPointF& mouse, const QMatrix4x4& viewProj) const;
     // 必须在 m_sim->mtx 锁内调用：采样 TCP 的世界坐标与它在 item 逻辑像素坐标里的位置。
     // 返回 false 表示当前不该显示读数（gizmo 不可见 / 位姿无效 / 相机不可用 / 在相机背后）。
     bool sampleGizmoReadoutLocked(QVector3D& worldPos, QPointF& screenPos) const;
@@ -1186,11 +1180,6 @@ private:
     bool gizmoHandleMouseMove(const QPointF& pos);
     bool gizmoHandleMouseRelease();
     void gizmoUpdateHover(const QPointF& pos);
-    // 按当前对齐模式返回轴 0/1/2 的世界向量与旋转环平面基（工具模式下右乘 gizmo 姿态）。
-    QVector3D gizmoAxisVec(int axis) const;
-    void gizmoPlaneBasis(int axis, QVector3D& e1, QVector3D& e2) const;
-    // 按对齐模式返回某个平移手柄的方向（含正负号），例如 -X / +Y。
-    QVector3D gizmoHandleDir(int handle) const;
     // 必须在 m_sim->mtx 锁内调用：按当前 m, d 采样所有自动跟踪的轨迹。
     void sampleTrackedTrajectoriesLocked(const mjModel* m, const mjData* d);
     // 查找 trajectoryId 对应的状态，未找到返回 nullptr。

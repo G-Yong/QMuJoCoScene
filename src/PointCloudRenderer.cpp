@@ -283,6 +283,26 @@ void main() {
 }
 )GLSL";
 
+// gizmo 叠加层的线段：只做 MVP 变换 + 直传颜色，深度由调用方控制。
+const char* kLineVertexShader = R"GLSL(
+#version 330
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec4 aColor;
+uniform mat4 uMVP;
+out vec4 vColor;
+void main() {
+    vColor = aColor;
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)GLSL";
+
+const char* kLineFragmentShader = R"GLSL(
+#version 330
+in vec4 vColor;
+out vec4 fragColor;
+void main() { fragColor = vColor; }
+)GLSL";
+
 } // namespace
 
 PointCloudRenderer::PointCloudRenderer() = default;
@@ -330,6 +350,67 @@ PointCloudRenderer::GpuCloud& PointCloudRenderer::ensureCloud(int cloudId) {
     gl->glGenBuffers(1, &c.colVbo);
     return m_clouds.emplace(cloudId, c).first->second;
 }
+
+bool PointCloudRenderer::ensureLineProgram() {
+    if (m_lineProg) return true;
+    auto* prog = new QOpenGLShaderProgram();
+    if (!prog->addShaderFromSourceCode(QOpenGLShader::Vertex, kLineVertexShader) ||
+        !prog->addShaderFromSourceCode(QOpenGLShader::Fragment, kLineFragmentShader) ||
+        !prog->link()) {
+        delete prog;
+        return false;
+    }
+    m_lineProg = prog;
+    m_locLineMVP = prog->uniformLocation("uMVP");
+    auto* gl = QOpenGLContext::currentContext()->extraFunctions();
+    gl->glGenVertexArrays(1, &m_lineVao);
+    gl->glGenBuffers(1, &m_linePosVbo);
+    gl->glGenBuffers(1, &m_lineColVbo);
+    return true;
+}
+
+void PointCloudRenderer::drawLines(const float* xyz, const float* rgba, int vertexCount,
+                                   float widthPx, bool depthTest) {
+    if (vertexCount <= 0 || !xyz || !rgba) return;
+    if (!ensureLineProgram()) return;
+    auto* gl = QOpenGLContext::currentContext()->extraFunctions();
+
+    gl->glBindVertexArray(m_lineVao);
+    gl->glBindBuffer(GL_ARRAY_BUFFER, m_linePosVbo);
+    gl->glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<qopengl_GLsizeiptr>(sizeof(float) * 3 * vertexCount),
+                     xyz, GL_DYNAMIC_DRAW);
+    gl->glEnableVertexAttribArray(0);
+    gl->glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+    gl->glBindBuffer(GL_ARRAY_BUFFER, m_lineColVbo);
+    gl->glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<qopengl_GLsizeiptr>(sizeof(float) * 4 * vertexCount),
+                     rgba, GL_DYNAMIC_DRAW);
+    gl->glEnableVertexAttribArray(1);
+    gl->glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), nullptr);
+
+    if (depthTest) {
+        gl->glEnable(GL_DEPTH_TEST);
+        gl->glDepthMask(GL_TRUE);
+    } else {
+        // 关深度测试 + 不写深度 → 永远盖在最前，且不干扰后续绘制的深度。
+        gl->glDisable(GL_DEPTH_TEST);
+        gl->glDepthMask(GL_FALSE);
+    }
+    gl->glLineWidth(widthPx > 0.0f ? widthPx : 1.0f);
+
+    m_lineProg->bind();
+    m_lineProg->setUniformValue(m_locLineMVP, m_proj * m_view);
+    gl->glDrawArrays(GL_LINES, 0, vertexCount);
+    m_lineProg->release();
+
+    // 复位到 beginFrame 的默认（reverse-Z 深度测试），免得影响后续帧/绘制。
+    gl->glEnable(GL_DEPTH_TEST);
+    gl->glDepthMask(GL_TRUE);
+    gl->glBindVertexArray(0);
+    gl->glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
 
 void PointCloudRenderer::uploadPositions(int cloudId, const float* xyz, int count) {
     if (count < 0) count = 0;
@@ -826,6 +907,9 @@ void PointCloudRenderer::releaseGL() {
         if (m_sceneDepthTex)   { f->glDeleteTextures(1, &m_sceneDepthTex); m_sceneDepthTex = 0; }
         if (m_sceneDepthMsTex) { f->glDeleteTextures(1, &m_sceneDepthMsTex); m_sceneDepthMsTex = 0; }
         if (m_dummyVao)        { gl->glDeleteVertexArrays(1, &m_dummyVao); m_dummyVao = 0; }
+        if (m_lineVao)         { gl->glDeleteVertexArrays(1, &m_lineVao); m_lineVao = 0; }
+        if (m_linePosVbo)      { gl->glDeleteBuffers(1, &m_linePosVbo); m_linePosVbo = 0; }
+        if (m_lineColVbo)      { gl->glDeleteBuffers(1, &m_lineColVbo); m_lineColVbo = 0; }
     }
     m_clouds.clear();
     m_reflW = m_reflH = m_reflSamples = 0;
@@ -835,4 +919,6 @@ void PointCloudRenderer::releaseGL() {
     m_scatterProg = nullptr;
     delete m_resolveProg;
     m_resolveProg = nullptr;
+    delete m_lineProg;
+    m_lineProg = nullptr;
 }
