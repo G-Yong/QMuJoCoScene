@@ -44,6 +44,7 @@
 
 #include "IMujocoHost.h"
 #include "DragTeachGizmo.h"
+#include "AxisGizmo.h"
 #include "simulationtypes.h"
 
 class QOpenGLContext;
@@ -346,7 +347,8 @@ public:
     // 姿态旋转（工具坐标系）。
     bool gizmoVisible() const { return m_gizmo.visible(); }
     void setGizmoVisible(bool visible);
-    bool gizmoDragging() const { return m_gizmo.dragging(); }
+    // 主 gizmo 或附加轴 gizmo 任一在拖动。
+    bool gizmoDragging() const { return m_gizmo.dragging() || m_axisGizmo.dragging(); }
     // 手柄对齐：false=世界轴（默认），true=工具坐标系（手柄随 TCP 姿态旋转）。
     bool gizmoToolAligned() const { return m_gizmo.toolAligned(); }
     void setGizmoToolAligned(bool aligned);
@@ -388,6 +390,10 @@ public:
     // gizmo 是否一直显示在最前面（不被物体遮挡），默认 true。
     bool   gizmoAlwaysOnTop() const { return m_gizmo.alwaysOnTop(); }
     void   setGizmoAlwaysOnTop(bool on);
+    // 附加轴 / 变位机 gizmo：控制机器人本体之外的单自由度关节（hinge 旋转 / slide 平移）。
+    // 拖动**直接改该关节 qpos，不做逆解**；显示与否跟随主 gizmo（gizmoVisible）。
+    // jointNames = 要挂 gizmo 的关节名列表；空列表 = 关闭。关节类型自动按模型判定。
+    Q_INVOKABLE void setAdditionalAxes(const QStringList& jointNames);
     // 上层在 gizmoPoseEdited() 槽内回调：报告刚给出的位姿 IK 是否可解。
     // 不可解不会打断拖动（手柄始终跟手），只决定松手时 gizmo 回弹到哪。
     Q_INVOKABLE void reportGizmoEditSolvable(bool solvable);
@@ -889,6 +895,9 @@ signals:
     void jointsReadoutMarginChanged();
     // 拖动 gizmo 时连续发出目标 TCP 世界位姿（位置单位：米；姿态：世界系四元数）。
     void gizmoPoseEdited(const QVector3D& position, const QQuaternion& orientation);
+    // 拖动附加轴 / 变位机 gizmo 时连续发出（关节名 + 新 qpos）。已直接写入 qpos，
+    // 此信号仅供上层观察（不需要做逆解）。
+    void additionalAxisEdited(const QString& jointName, double value);
 
     // 场景加载结果通知
     void sceneLoaded(const QString& source);
@@ -1085,6 +1094,8 @@ private:
     // 本类只做编排：持 m_sim->mtx 后驱动它、用 scn 相机构造 viewProj 传进去、把它的
     // 叠加层线段交给渲染线程画、并把 QML 属性/信号转接过去。
     DragTeachGizmo m_gizmo;
+    // 附加轴 / 变位机 gizmo（单自由度关节，拖动直接改 qpos，不做逆解）。显示跟随 m_gizmo。
+    AxisGizmo      m_axisGizmo;
 
     // TCP 坐标读数：渲染线程在 onFrameRendered 里只做锁内采样（世界坐标 + 屏幕位置），
     // 经 queued lambda 到 GUI 线程格式化成 m_gizmoPosText / m_gizmoPosScreen 并发信号

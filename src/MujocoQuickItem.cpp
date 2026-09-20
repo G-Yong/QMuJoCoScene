@@ -735,6 +735,7 @@ void MujocoQuickItem::setSimulationRunning(bool running) {
             sim.scrub_index = 0;
             sim.pert.active = 0;
             // 仿真开始运行：自动隐藏拖动示教 gizmo。
+            m_axisGizmo.setVisible(false);
             if (m_gizmo.setVisible(false)) {
                 rebuildTrajectoryGeomsLocked();
                 hideGizmo = true;
@@ -1289,8 +1290,10 @@ void MujocoQuickItem::rebuildTrajectoryGeomsLocked() {
         }
         if (g >= maxg) break;
     }
-    // gizmo 段紧跟轨迹段之后：交给 DragTeachGizmo 写 user_scn / 收集叠加层，返回新 ngeom。
-    m_userScene->ngeom = m_gizmo.rebuildGeoms(m_userScene, g);
+    // gizmo 段紧跟轨迹段之后：主 gizmo 写 user_scn / 收集叠加层，返回新 ngeom；
+    // 附加轴 gizmo 再接在其后。
+    const int afterMain = m_gizmo.rebuildGeoms(m_userScene, g);
+    m_userScene->ngeom = m_axisGizmo.rebuildGeoms(m_userScene, afterMain);
 }
 
 bool MujocoQuickItem::buildGizmoCameraLocked(QMatrix4x4& viewProj, QVector3D& camPos) const {
@@ -1531,24 +1534,52 @@ void MujocoQuickItem::setGizmoVisible(bool visible) {
     bool changed = false;
     if (m_sim) {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+        // 附加轴 gizmo 的显示跟随主 gizmo。
+        m_axisGizmo.setVisible(visible);
         if (m_gizmo.setVisible(visible)) {
             changed = true;
             if (visible && m_sim->m_ && m_sim->d_) {
                 m_gizmo.updatePoseFromSite(m_sim->m_, m_sim->d_);
+                m_axisGizmo.updateFromData(m_sim->m_, m_sim->d_);
                 // 恒定屏幕尺寸：先把生效尺寸算对再重建 geom，否则第一帧是旧大小。
                 QMatrix4x4 vp; QVector3D camPos;
-                if (buildGizmoCameraLocked(vp, camPos))
+                if (buildGizmoCameraLocked(vp, camPos)) {
                     m_gizmo.updateEffectiveSize(vp, camPos, float(width()), float(height()));
+                    m_axisGizmo.updateEffectiveSizes(vp, camPos, float(width()), float(height()));
+                }
             }
             rebuildTrajectoryGeomsLocked();
         }
     } else if (m_gizmo.setVisible(visible)) {
+        m_axisGizmo.setVisible(visible);
         changed = true;
     }
     if (changed) {
         requestRenderUpdate();
         emit gizmoVisibleChanged();
     }
+}
+
+void MujocoQuickItem::setAdditionalAxes(const QStringList& jointNames) {
+    std::vector<QString> names;
+    names.reserve(jointNames.size());
+    for (const QString& n : jointNames) names.push_back(n);
+    if (m_sim) {
+        std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+        m_axisGizmo.setJointNames(names);
+        m_axisGizmo.setVisible(m_gizmo.visible());
+        m_axisGizmo.setAlwaysOnTop(m_gizmo.alwaysOnTop());
+        if (m_sim->m_ && m_sim->d_) {
+            m_axisGizmo.updateFromData(m_sim->m_, m_sim->d_);
+            QMatrix4x4 vp; QVector3D camPos;
+            if (buildGizmoCameraLocked(vp, camPos))
+                m_axisGizmo.updateEffectiveSizes(vp, camPos, float(width()), float(height()));
+        }
+        rebuildTrajectoryGeomsLocked();
+    } else {
+        m_axisGizmo.setJointNames(names);
+    }
+    requestRenderUpdate();
 }
 
 void MujocoQuickItem::setGizmoToolAligned(bool aligned) {
@@ -1617,6 +1648,7 @@ void MujocoQuickItem::setGizmoScreenSizePx(double px) {
 
 void MujocoQuickItem::setGizmoAlwaysOnTop(bool on) {
     if (!m_gizmo.setAlwaysOnTop(on)) return;
+    m_axisGizmo.setAlwaysOnTop(on);   // 附加轴 gizmo 跟随
     // 切换后重建：on→线段挪到 overlay 且撤出 user_scn，off→反之。
     if (m_sim) {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
@@ -1638,35 +1670,68 @@ bool MujocoQuickItem::gizmoHandleMousePress(const QPointF& pos) {
     bool consumed = false;
     {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
-        if (!m_gizmo.visible() || !m_gizmo.poseValid()) return false;
+        if (!m_gizmo.visible()) return false;
         QMatrix4x4 vp; QVector3D camPos;
         if (!buildGizmoCameraLocked(vp, camPos)) return false;
-        if (!m_gizmo.press(pos, vp, float(width()), float(height()))) return false;
-        rebuildTrajectoryGeomsLocked();
-        consumed = true;
+        // 先试主 gizmo（TCP），未命中再试附加轴 gizmo。
+        if (m_gizmo.poseValid() && m_gizmo.press(pos, vp, float(width()), float(height()))) {
+            rebuildTrajectoryGeomsLocked();
+            consumed = true;
+        } else if (m_axisGizmo.press(pos, vp, float(width()), float(height()))) {
+            rebuildTrajectoryGeomsLocked();
+            consumed = true;
+        }
     }
-    requestRenderUpdate();
-    emit gizmoDraggingChanged();
+    if (consumed) {
+        requestRenderUpdate();
+        emit gizmoDraggingChanged();
+    }
     return consumed;
 }
 
 bool MujocoQuickItem::gizmoHandleMouseMove(const QPointF& pos) {
     if (!m_sim) return false;
     QVector3D emitPos; QQuaternion emitOri; bool doEmit = false;
+    QString axisJoint; double axisValue = 0.0; bool axisEmit = false;
     {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
-        if (!m_gizmo.dragging()) return false;
         QMatrix4x4 vp; QVector3D camPos;
-        if (!buildGizmoCameraLocked(vp, camPos)) { m_gizmo.setLastMouse(pos); return true; }
-        bool poseEdited = false;
-        m_gizmo.move(pos, vp, camPos, float(width()), float(height()),
-                     emitPos, emitOri, poseEdited);
-        rebuildTrajectoryGeomsLocked();
-        doEmit = poseEdited;
+        if (m_gizmo.dragging()) {
+            if (!buildGizmoCameraLocked(vp, camPos)) { m_gizmo.setLastMouse(pos); return true; }
+            bool poseEdited = false;
+            m_gizmo.move(pos, vp, camPos, float(width()), float(height()),
+                         emitPos, emitOri, poseEdited);
+            rebuildTrajectoryGeomsLocked();
+            doEmit = poseEdited;
+        } else if (m_axisGizmo.dragging()) {
+            if (!buildGizmoCameraLocked(vp, camPos)) { m_axisGizmo.setLastMouse(pos); return true; }
+            bool edited = false;
+            m_axisGizmo.move(pos, vp, camPos, float(width()), float(height()),
+                             axisJoint, axisValue, edited);
+            if (edited && m_sim->m_ && m_sim->d_) {
+                // 附加轴：直接写该关节 qpos（不做逆解），mj_forward 让 gizmo/几何跟上。
+                const int id = mj_name2id(m_sim->m_, mjOBJ_JOINT, axisJoint.toUtf8().constData());
+                if (id >= 0 && id < m_sim->m_->njnt) {
+                    setHingeJointValue(m_sim->m_, m_sim->d_, m_sim->qpos_, m_sim->qpos_prev_,
+                                       id, axisValue);
+                    mj_forward(m_sim->m_, m_sim->d_);
+                    markUiRefresh(*m_sim);
+                    m_axisGizmo.updateFromData(m_sim->m_, m_sim->d_);
+                }
+            }
+            rebuildTrajectoryGeomsLocked();
+            axisEmit = edited;
+        } else {
+            return false;
+        }
     }
     if (doEmit) {
         // 上层在此槽内同步做 IK 并回调 reportGizmoEditSolvable()。
         emit gizmoPoseEdited(emitPos, emitOri);
+        requestRenderUpdate();
+    }
+    if (axisEmit) {
+        emit additionalAxisEdited(axisJoint, axisValue);
         requestRenderUpdate();
     }
     return true;
@@ -1677,7 +1742,9 @@ bool MujocoQuickItem::gizmoHandleMouseRelease() {
     bool wasDragging = false;
     {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
-        if (!m_gizmo.release()) return false;
+        const bool a = m_gizmo.release();
+        const bool b = m_axisGizmo.release();
+        if (!a && !b) return false;
         wasDragging = true;
         rebuildTrajectoryGeomsLocked();
     }
@@ -1693,7 +1760,9 @@ void MujocoQuickItem::gizmoUpdateHover(const QPointF& pos) {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
         QMatrix4x4 vp; QVector3D camPos;
         if (!buildGizmoCameraLocked(vp, camPos)) return;  // 无相机：保持当前高亮不变
-        changed = m_gizmo.updateHover(pos, vp, float(width()), float(height()));
+        const bool a = m_gizmo.updateHover(pos, vp, float(width()), float(height()));
+        const bool b = m_axisGizmo.updateHover(pos, vp, float(width()), float(height()));
+        changed = a || b;
         if (changed) rebuildTrajectoryGeomsLocked();
     }
     if (changed) requestRenderUpdate();
@@ -1982,10 +2051,13 @@ void MujocoQuickItem::onRenderOverlay(unsigned int targetFbo, int viewWidth, int
 
     // gizmo always-on-top 线段（从 DragTeachGizmo 拷出一份，绘制时不持锁）。
     std::vector<DragTeachGizmo::LineBatch> gizmoLines;
+    std::vector<AxisGizmo::LineBatch>      axisLines;
     if (m_gizmo.alwaysOnTop())
         gizmoLines = m_gizmo.overlayLinesCopy();
+    if (m_axisGizmo.alwaysOnTop())
+        axisLines = m_axisGizmo.overlayLinesCopy();
 
-    if (!anyVisible && gizmoLines.empty()) return;
+    if (!anyVisible && gizmoLines.empty() && axisLines.empty()) return;
     if (!m_pointRenderer) m_pointRenderer.reset(new PointCloudRenderer());
 
     // 相机：与 mjr_render 的 setView 一致，mono 取 camera[0]/camera[1] 的平均。
@@ -2015,6 +2087,11 @@ void MujocoQuickItem::onRenderOverlay(unsigned int targetFbo, int viewWidth, int
     }
     // gizmo 最后画、且关掉深度测试 → 永远盖在场景（含点云）之上。
     for (const DragTeachGizmo::LineBatch& b : gizmoLines) {
+        m_pointRenderer->drawLines(b.xyz.data(), b.rgba.data(),
+                                   static_cast<int>(b.xyz.size() / 3),
+                                   b.widthPx, /*depthTest=*/false);
+    }
+    for (const AxisGizmo::LineBatch& b : axisLines) {
         m_pointRenderer->drawLines(b.xyz.data(), b.rgba.data(),
                                    static_cast<int>(b.xyz.size() / 3),
                                    b.widthPx, /*depthTest=*/false);
@@ -4146,9 +4223,14 @@ void MujocoQuickItem::onFrameRendered() {
             // 深度变化也同理），变了同样要重建 geom。
             if (m_gizmo.visible()) {
                 QMatrix4x4 vp; QVector3D camPos;
-                if (buildGizmoCameraLocked(vp, camPos) &&
-                    m_gizmo.updateEffectiveSize(vp, camPos, float(width()), float(height())))
-                    gizmoDirty = true;
+                if (buildGizmoCameraLocked(vp, camPos)) {
+                    if (m_gizmo.updateEffectiveSize(vp, camPos, float(width()), float(height())))
+                        gizmoDirty = true;
+                    // 附加轴 gizmo：跟随关节位姿 + 恒定屏幕尺寸重算。
+                    if (m_axisGizmo.updateFromData(m_sim->m_, m_sim->d_)) gizmoDirty = true;
+                    if (m_axisGizmo.updateEffectiveSizes(vp, camPos, float(width()), float(height())))
+                        gizmoDirty = true;
+                }
             }
             if (gizmoDirty) rebuildTrajectoryGeomsLocked();
         }
@@ -4191,6 +4273,7 @@ void MujocoQuickItem::onFrameRendered() {
         }
         // 无论从哪条路径开始运行（空格键 / MuJoCo UI / 属性），都自动隐藏拖动示教 gizmo。
         if (simRunning && m_gizmo.setVisible(false)) {
+            m_axisGizmo.setVisible(false);
             rebuildTrajectoryGeomsLocked();
             gizmoHidden = true;
         }
