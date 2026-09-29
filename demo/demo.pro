@@ -12,6 +12,10 @@ TEMPLATE  = app
 # /utf-8 = /source-charset:utf-8 /execution-charset:utf-8，一次性解决
 win32-msvc* {
     QMAKE_CXXFLAGS += /utf-8
+
+    # 把进程 ANSI 代码页设为 UTF-8，使 MuJoCo 的窄字符 fopen 能打开中文路径的 mesh。
+    # qmake 默认已带 /MANIFEST:embed，这里合并我们的 activeCodePage=UTF-8 片段。
+    QMAKE_LFLAGS += /MANIFESTINPUT:$$shell_quote($$shell_path($$PWD/utf8.manifest))
 }
 
 include(../src/qmujocoscene.pri)

@@ -4585,7 +4585,9 @@ struct LoadedModel {
 
 LoadedModel loadModelFile(const QString& filename, mujoco::Simulate& sim) {
     char err[kErrorLength] = "";
-    QByteArray utf8 = filename.toLocal8Bit();
+    // 路径统一用 UTF-8：MuJoCo 内部对 XML 里引用的 mesh 路径按 UTF-8 字节做窄字符 fopen，
+    // 顶层路径也必须是 UTF-8 才能与之一致（配合 exe 的 activeCodePage=UTF-8 清单）。
+    QByteArray utf8 = filename.toUtf8();
     LoadedModel result;
     if (filename.endsWith(".mjb", Qt::CaseInsensitive)) {
         result.model = mj_loadModel(utf8.constData(), nullptr);
@@ -4626,12 +4628,12 @@ void MujocoQuickItem::physicsThreadMain() {
         if (m_hasPendingLoad.exchange(false)) {
             QString file;
             { std::lock_guard<std::mutex> lk(m_pendingMtx); file = m_pendingFile; }
-            sim.LoadMessage(file.toLocal8Bit().constData());
+            sim.LoadMessage(file.toUtf8().constData());
             LoadedModel loaded = loadModelFile(file, sim);
             mjModel* mnew = loaded.model;
             mjData*  dnew = mnew ? mj_makeData(mnew) : nullptr;
             if (dnew) {
-                sim.Load(mnew, dnew, file.toLocal8Bit().constData());
+                sim.Load(mnew, dnew, file.toUtf8().constData());
                 m_historyDepth.store(0);   // 新模型：history 缓冲已重建，回退深度归零
                 std::unique_lock<std::recursive_mutex> lk(sim.mtx);
                 if (d) mj_deleteData(d);
