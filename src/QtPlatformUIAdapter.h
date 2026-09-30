@@ -95,6 +95,11 @@ public:
     // 渲染线程：在 GL context 当前的情况下释放我们持有的 GL 资源
     void ReleaseSharedGL();
 
+    // 渲染线程：在 GL context 当前的情况下释放 mjrContext（con_）里的 GL 资源。
+    // 基类 FreeMjrContext 是 protected，这里公开出来，供 MujocoQuickItem 在渲染线程
+    // 退出（context 仍 current）时调用，避免留到主线程析构时无 current context 空放。
+    void FreeMjrContextGL() { FreeMjrContext(); }
+
     // ---- 帧节拍（mujoco 渲染 vs Qt Quick 场景图渲染）----
     // Qt Quick 渲染线程在从 m_sharedTex 采样完成后调用，表示上一帧已被消费。
     void NotifyConsumed();

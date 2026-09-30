@@ -4539,7 +4539,14 @@ void MujocoQuickItem::renderThreadMain() {
     if (m_pointRenderer) m_pointRenderer->releaseGL();
 
     // 释放适配器持有的 GL 资源（共享纹理 / FBO），此时 GL context 仍在当前线程
-    if (m_adapterRaw) m_adapterRaw->ReleaseSharedGL();
+    if (m_adapterRaw) {
+        m_adapterRaw->ReleaseSharedGL();
+        // mjrContext（离屏 FBO / 阴影贴图 / 字体纹理 / 着色器 / VBO 等）必须在这里、
+        // 趁本线程 GL context 仍 current 时释放。否则它只会在 ~QtPlatformUIAdapter
+        // （主线程、无 current context）里被 mjr_freeContext 空放，GL 对象全部泄漏；
+        // 又因 context 与全局共享组共享，delete m_ctx 也回收不掉 → 每次 close 累积一份。
+        m_adapterRaw->FreeMjrContextGL();
+    }
 
     m_ctx->doneCurrent();
 
