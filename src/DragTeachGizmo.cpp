@@ -118,6 +118,10 @@ constexpr int   kRingProbeSamples = 16;     // 量环投影半径的采样段数
 constexpr float kHitTolPx         = 8.0f;   // 命中容差（像素）
 constexpr float kTwoPi            = 6.28318530717958647692f;
 
+// 拖动时沿激活轴画的贯穿全场辅助线（世界米半长 + 像素线宽）。
+constexpr float kGuideLineHalfLen = 1000.0f;
+constexpr float kGuideLineWidthPx = 1.0f;
+
 } // namespace
 
 // ===========================================================================
@@ -258,6 +262,11 @@ int DragTeachGizmo::rebuildGeoms(mjvScene* userScene, int startIndex) {
     const float size = m_size;
     int g = startIndex;
 
+    // 拖动模式：平移/平面拖动隐藏旋转环（平面拖动还隐藏其它平面块）；旋转拖动只留激活环。
+    const bool dragT = m_dragging && m_dragMode == 0;
+    const bool dragR = m_dragging && m_dragMode == 1;
+    const bool dragP = m_dragging && m_dragMode == 2;
+
     auto handleLineWidth = [&](int handle) {
         return (handle == m_active || handle == m_hovered) ? kLineWidthSelPx : kLineWidthPx;
     };
@@ -287,8 +296,17 @@ int DragTeachGizmo::rebuildGeoms(mjvScene* userScene, int startIndex) {
         ++g;
     };
 
-    // 平移箭头（handle 0..5）：根部在 TCP 中心，沿轴向外伸。
-    for (int handle = 0; handle < kTranslateHandleCount && g < maxg; ++handle) {
+    // 拖动某轴时，沿该轴画一条贯穿全场的辅助线（平移沿平移轴 / 旋转沿旋转轴）。
+    if (dragT || dragR) {
+        const int ax = m_dragAxis;
+        const QVector3D gdir = axisVec(ax);
+        const float gcolor[4] = { kBase[ax][0], kBase[ax][1], kBase[ax][2], 1.0f };
+        addLine(c - gdir * kGuideLineHalfLen, c + gdir * kGuideLineHalfLen,
+                gcolor, kGuideLineWidthPx);
+    }
+
+    // 平移箭头：只画正半轴（handle 1/3/5，仿 Blender）；旋转拖动时整体隐藏。
+    for (int handle = 1; !dragR && handle < kTranslateHandleCount && g < maxg; handle += 2) {
         const int axis = handleAxis(handle);
         const QVector3D a = handleDir(handle);
         float color[4];
@@ -318,9 +336,10 @@ int DragTeachGizmo::rebuildGeoms(mjvScene* userScene, int startIndex) {
         }
     }
 
-    // 旋转环（handle 6..8）。
-    for (int axis = 0; axis < 3; ++axis) {
+    // 旋转环（handle 6..8）。平移/平面拖动全隐藏；旋转拖动只留激活环。
+    for (int axis = 0; !dragT && !dragP && axis < 3; ++axis) {
         const int handle = kHandleRingBase + axis;
+        if (dragR && handle != m_active) continue;
         float color[4];
         handleColor(handle, color);
         QVector3D e1, e2;
@@ -347,8 +366,8 @@ int DragTeachGizmo::rebuildGeoms(mjvScene* userScene, int startIndex) {
         }
     }
 
-    // 平面拖动手柄（handle 9..11）：每块一个正方形外框。
-    for (int p = 0; p < kPlaneHandleCount; ++p) {
+    // 平面拖动手柄（handle 9..11）：每块一个正方形外框。平移/旋转拖动时隐藏。
+    for (int p = 0; !dragT && !dragR && p < kPlaneHandleCount; ++p) {
         const int handle = kPlaneHandleBase + p;
         float color[4];
         handleColor(handle, color);
@@ -452,8 +471,8 @@ int DragTeachGizmo::hitTest(const QPointF& mouse, const QMatrix4x4& vp, float w,
             return handle;
     }
 
-    // 平移箭头。
-    for (int handle = 0; handle < kTranslateHandleCount; ++handle) {
+    // 平移箭头：只命中正半轴（handle 1/3/5），与渲染一致。
+    for (int handle = 1; handle < kTranslateHandleCount; handle += 2) {
         bool okR = false, okT = false;
         const QVector3D dir = handleDir(handle);
         const QPointF a = worldToScreen(vp, c + dir * arrowRoot, w, h, &okR);
