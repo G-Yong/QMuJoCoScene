@@ -28,6 +28,7 @@
 #include <QSGSimpleTextureNode>
 #include <QFileInfo>
 #include <QTemporaryFile>
+#include <QStandardPaths>
 #include <QDir>
 #include <QPainter>
 #include <QImage>
@@ -59,8 +60,72 @@ const bool kSimClockDebug = qEnvironmentVariableIsSet("ROBOTSIM_CLOCK_DEBUG");
 // MujocoQuickItem 成员函数实现）。
 using namespace mqi_detail;
 
-// 前向声明：锁内把控制值写穿到 d->ctrl（定义在文件后段）。
-static inline void applyControlImmediately(mujoco::Simulate& sim, int id, double value);
+// ===========================================================================
+// 执行器 ↔ 控制分量映射
+//
+// MuJoCo 3.11 起一个执行器可以占用多个 ctrl 分量（<pid> 的 pos/vel/ff、
+// <orientation> 的 3 或 4 个输入、<dcmotor> 的 voltage 等），此时
+//     m->nactuator（执行器个数） != m->nu（控制分量总数）
+// **执行器 id 不再等于 ctrl 下标**。任何 d->ctrl[...] 访问都必须经
+// actuator_ctrladr / actuator_ctrlnum 换算，否则一旦引入多输入执行器就会
+// 静默写错分量。
+//
+// 同理 actuator_gear / actuator_length* 是 **按力输出编号**（nout）存的，
+// 多输出执行器（orientation，outnum = 3）要用 actuator_outadr 定位。
+//
+// 本文件统一约定：
+//   - 形如 actuatorId / actuatorIndex 的参数 = mjModel::nactuator 下标；
+//   - 形如 ctrlIndex / addr        的参数 = mjModel::nu 下标（平铺控制向量）。
+// ===========================================================================
+
+// 执行器 → 第一个控制分量的下标；越界返回 -1。
+static inline int actuatorCtrlAddr(const mjModel* m, int actuatorId) {
+    return (m && actuatorId >= 0 && actuatorId < m->nactuator)
+               ? m->actuator_ctrladr[actuatorId] : -1;
+}
+
+// 执行器占用的控制分量个数（单输入执行器为 1）；越界返回 0。
+static inline int actuatorCtrlNum(const mjModel* m, int actuatorId) {
+    return (m && actuatorId >= 0 && actuatorId < m->nactuator)
+               ? m->actuator_ctrlnum[actuatorId] : 0;
+}
+
+// 执行器 → 第一个力输出的下标（actuator_gear 等 nout 数组的索引）；越界返回 -1。
+static inline int actuatorOutAddr(const mjModel* m, int actuatorId) {
+    return (m && actuatorId >= 0 && actuatorId < m->nactuator)
+               ? m->actuator_outadr[actuatorId] : -1;
+}
+
+// 载入模型后检查是否存在多输入执行器：这类执行器只能用多值接口操作，
+// 单值接口（setControl / control / resetSimulationToState 的 controlValues）
+// 会拒绝写入。这里在载入时主动报一次，避免运行时出现"静默写错分量"。
+static void warnOnMultiInputActuators(const mjModel* m, const char* where)
+{
+    if (!m) return;
+    QStringList multi;
+    for (int i = 0; i < m->nactuator; ++i) {
+        const int n = m->actuator_ctrlnum[i];
+        if (n == 1) continue;
+        const char* raw = mj_id2name(m, mjOBJ_ACTUATOR, i);
+        multi << QStringLiteral("%1(ctrlnum=%2)")
+                     .arg(raw ? QString::fromUtf8(raw) : QString::number(i))
+                     .arg(n);
+    }
+    if (!multi.isEmpty()) {
+        qWarning().noquote()
+            << "MujocoQuickItem[" << (where ? where : "?")
+            << "]: 检测到多输入执行器（一个执行器占多个 ctrl 分量），"
+               "单值接口 setControl/control 对它们无效，请改用 "
+               "setControlVector/controlVector："
+            << multi.join(QStringLiteral(", "));
+    }
+}
+
+// 前向声明（定义在文件后段）：锁内把控制值写穿到 d->ctrl。
+// 注意参数含义 —— ctrlIndex 是 **nu 下标**（平铺控制向量），
+// actuatorId 是 **nactuator 下标**（执行器）。
+static inline bool applyControlAtCtrlIndex(mujoco::Simulate& sim, int ctrlIndex, double value);
+static inline bool applyActuatorControl(mujoco::Simulate& sim, int actuatorId, double value);
 
 // 缓入缓出函数（cubic ease-in-out），用于相机过渡。
 static float easeInOutCubic(float t) {
@@ -486,6 +551,28 @@ bool MujocoQuickItem::loadScene(const QString& filename) {
     return true;
 }
 
+// 逐个候选实际建文件验证后返回可用目录；QFileInfo::isWritable() 在受限令牌/沙箱下
+// 会谎报 true（ACL 允许但低完整性令牌写 Medium 目录仍 ACCESS_DENIED）。全失败返回空串。
+static QString writableSceneTempDir()
+{
+    QStringList candidates;
+    candidates << QDir::tempPath()
+               << QStandardPaths::writableLocation(QStandardPaths::TempLocation)
+               << QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+               << QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
+               << QDir::currentPath();
+    candidates.removeAll(QString());
+    candidates.removeDuplicates();
+
+    for (const QString& dir : candidates) {
+        QDir().mkpath(dir);
+        QTemporaryFile probe(dir + QStringLiteral("/mujoco_scene_probe_XXXXXX.tmp"));
+        if (probe.open())
+            return dir;
+    }
+    return QString();
+}
+
 bool MujocoQuickItem::loadSceneFromData(const QByteArray& data, const QString& format) {
     if (data.isEmpty()) {
         const QString err = QStringLiteral("Scene data is empty");
@@ -505,12 +592,39 @@ bool MujocoQuickItem::loadSceneFromData(const QByteArray& data, const QString& f
         return false;
     }
 
-    // 写入临时文件 (保留实例存活，以便 mujoco 异步加载期间文件不会被删除)
-    auto tmp = std::unique_ptr<QTemporaryFile>(new QTemporaryFile(
-        QDir::tempPath() + QStringLiteral("/mujoco_scene_XXXXXX.") + suffix));
-    tmp->setAutoRemove(true);
-    if (!tmp->open()) {
-        const QString err = QStringLiteral("Failed to create temporary scene file: %1").arg(tmp->errorString());
+    // 临时文件需保留实例存活，以便 mujoco 异步加载期间文件不会被删除。
+    const QString tempDir = writableSceneTempDir();
+    if (tempDir.isEmpty()) {
+        const QString err = QStringLiteral("No writable directory for temporary scene file "
+                                           "(tried %TEMP%, cache and working directory)");
+        qWarning() << "MujocoQuickItem:" << err;
+        setLastError(err);
+        emit sceneLoadFailed(err);
+        return false;
+    }
+    if (tempDir != QDir::tempPath()) {
+        static bool loggedFallback = false;
+        if (!loggedFallback) {
+            loggedFallback = true;
+            qWarning().noquote() << "MujocoQuickItem: %TEMP%(" << QDir::tempPath()
+                                 << ") 不可写（受限令牌/沙箱），临时场景文件改用:" << tempDir;
+        }
+    }
+
+    std::unique_ptr<QTemporaryFile> tmp;
+    QString openErr;
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        tmp.reset(new QTemporaryFile(
+            tempDir + QStringLiteral("/mujoco_scene_XXXXXX.") + suffix));
+        tmp->setAutoRemove(true);
+        if (tmp->open()) { openErr.clear(); break; }
+        openErr = tmp->errorString();
+        tmp.reset();
+        QThread::msleep(20);
+    }
+    if (!tmp) {
+        const QString err = QStringLiteral("Failed to create temporary scene file in %1: %2")
+                                .arg(tempDir, openErr);
         qWarning() << "MujocoQuickItem:" << err;
         setLastError(err);
         emit sceneLoadFailed(err);
@@ -571,18 +685,22 @@ bool MujocoQuickItem::isSettledLocked(const mjModel* m, mjData* d, double posTol
     // 所有关节速度趋零
     for (int i = 0; i < m->nv; ++i)
         if (std::abs(d->qvel[i]) > velTol) return false;
-    // 被驱动关节位置收敛到 ctrl 目标（position 伺服：ctrl = gear * qpos）
-    for (int a = 0; a < m->nu; ++a) {
+    // 被驱动关节位置收敛到 ctrl 目标（position 伺服：ctrl = gear * qpos）。
+    // 按 **执行器**（nactuator）遍历，ctrl 分量经 ctrladr 定位、gear 经 outadr
+    // 定位；多输入执行器（pid/orientation）没有单一的"位置目标"，跳过。
+    for (int a = 0; a < m->nactuator; ++a) {
         if (m->actuator_trntype[a] != mjTRN_JOINT)
             continue;
+        if (m->actuator_ctrlnum[a] != 1)
+            continue;   // 多输入执行器：ctrl 不是单一位置目标
         const int jid = m->actuator_trnid[2 * a];
         if (jid < 0 || jid >= m->njnt)
             continue;
         const int type = m->jnt_type[jid];
         if (type != mjJNT_HINGE && type != mjJNT_SLIDE)
             continue;   // 只检查单自由度被驱动关节
-        const double target = d->ctrl[a];
-        const double cur = d->qpos[m->jnt_qposadr[jid]] * m->actuator_gear[6 * a];
+        const double target = d->ctrl[m->actuator_ctrladr[a]];
+        const double cur = d->qpos[m->jnt_qposadr[jid]] * m->actuator_gear[6 * m->actuator_outadr[a]];
         if (std::abs(cur - target) > posTol) return false;
     }
     return true;
@@ -840,10 +958,11 @@ bool MujocoQuickItem::resetSimulationToState(const QVariantMap& jointValues,
         m_historyDepth.store(0);
 
         // 2) 同步 Simulate 的 qpos/ctrl 影子缓存，避免下一次 Sync 用旧缓存回写。
+        //    这里按 **平铺 ctrl 分量**（nu）遍历，与 d_->ctrl 一一对应。
         resyncSimulateQposCaches(sim);
         const int nu = static_cast<int>(sim.m_->nu);
         for (int i = 0; i < nu; ++i)
-            applyControlImmediately(sim, i, sim.d_->ctrl[i]);
+            applyControlAtCtrlIndex(sim, i, sim.d_->ctrl[i]);
 
         // 3) 覆盖指定关节的 qpos（按名，仅 hinge/slide）。
         for (auto it = jointValues.cbegin(); it != jointValues.cend(); ++it) {
@@ -856,10 +975,12 @@ bool MujocoQuickItem::resetSimulationToState(const QVariantMap& jointValues,
         }
 
         // 4) 覆盖指定执行器的 ctrl（按名），让位置伺服保持在目标姿态。
+        //    名称解析出来的是 **执行器 id**（nactuator 下标），故走执行器接口；
+        //    多输入执行器没有单一控制值，会被拒绝（需改用 setControlVector）。
         for (auto it = controlValues.cbegin(); it != controlValues.cend(); ++it) {
             const int id = mj_name2id(sim.m_, mjOBJ_ACTUATOR, it.key().toUtf8().constData());
-            if (!isValidIndex(id, nu)) continue;
-            applyControlImmediately(sim, id, it.value().toDouble());
+            if (!isValidIndex(id, static_cast<int>(sim.m_->nactuator))) continue;
+            applyActuatorControl(sim, id, it.value().toDouble());
         }
 
         // 5) 前向运动学刷新世界位姿，标记 UI 重绘。
@@ -874,7 +995,18 @@ bool MujocoQuickItem::zeroControls() {
     bool applied = false;
     withSimulateLocked([&](mujoco::Simulate& sim) {
         if (sim.is_passive_ || !sim.m_ || !sim.d_) return;
-        sim.pending_.zero_ctrl = true;
+        // 用 mj_resetCtrl 求中性值（零；四元数输入复位成单位四元数而不是 0），
+        // 并把结果同步进 staging(ctrl_/ctrl_prev_)——否则帧循环 Sync() 里
+        // "ctrl_ != ctrl_prev_ 就回写 d_->ctrl" 的规则会把刚清零的结果覆盖回旧值。
+        mj_resetCtrl(sim.m_, sim.d_);
+        const int nu = static_cast<int>(sim.m_->nu);
+        for (int i = 0; i < nu; ++i) {
+            const double v = sim.d_->ctrl[i];
+            if (i < static_cast<int>(sim.ctrl_.size())) sim.ctrl_[i] = v;
+            if (static_cast<size_t>(i) < sim.ctrl_prev_.size()) sim.ctrl_prev_[i] = v;
+        }
+        sim.pending_.ui_update_ctrl = true;
+        sim.pending_.ui_update_simulation = true;
         applied = true;
     });
     return applied;
@@ -3458,12 +3590,25 @@ QVariantList MujocoQuickItem::setJointsAndDetect(const QVariantList& values)
 // 驱动器控制接口
 // ---------------------------------------------------------------------------
 
-// 把 mjtTrn / mjtGain / mjtBias 转为可读字符串
-static const char* const kTrnTypeName[]  = {"joint", "jointInParent", "sliderCrank", "tendon", "site", "body"};
-static const char* const kGainTypeName[] = {"fixed", "affine", "muscle", "dcmotor", "user"};
-static const char* const kBiasTypeName[] = {"none", "affine", "muscle", "dcmotor", "user"};
+// 把 mjtTrn / mjtGain / mjtBias 转为可读字符串（下标必须与 mjtype.h 的枚举值一致）
+static const char* const kTrnTypeName[]  = {"joint", "jointInParent", "sliderCrank", "tendon", "site", "body",
+                                            "orientation"};
+static const char* const kGainTypeName[] = {"fixed", "affine", "muscle", "dcmotor", "so3", "pid", "user"};
+static const char* const kBiasTypeName[] = {"none", "affine", "muscle", "dcmotor", "so3", "user"};
 
 int MujocoQuickItem::actuatorCount() const
+{
+    int count = 0;
+    withSimulation([&](const mjModel* m, mjData*) {
+        // 注意是 **执行器个数**（nactuator），不是控制分量数（nu）；
+        // 多输入执行器（pid/orientation）存在时两者不相等，
+        // 平铺控制向量的长度请用 controlCount()。
+        count = static_cast<int>(m->nactuator);
+    });
+    return count;
+}
+
+int MujocoQuickItem::controlCount() const
 {
     int count = 0;
     withSimulation([&](const mjModel* m, mjData*) {
@@ -3472,11 +3617,33 @@ int MujocoQuickItem::actuatorCount() const
     return count;
 }
 
+int MujocoQuickItem::actuatorControlCount(int index) const
+{
+    int count = 0;
+    withSimulation([&](const mjModel* m, mjData*) {
+        count = actuatorCtrlNum(m, index);
+    });
+    return count;
+}
+
+QStringList MujocoQuickItem::actuatorInputNames(int index) const
+{
+    QStringList names;
+    withSimulation([&](const mjModel* m, mjData*) {
+        const int n = actuatorCtrlNum(m, index);
+        for (int i = 0; i < n; ++i) {
+            const char* nm = mj_actuatorInputName(m, index, i);
+            names << (nm ? QString::fromUtf8(nm) : QStringLiteral("#%1").arg(i));
+        }
+    });
+    return names;
+}
+
 ActuatorInfo MujocoQuickItem::actuatorInfo(int index) const
 {
     ActuatorInfo result;
     withSimulation([&](const mjModel* m, mjData*) {
-        if (!isValidIndex(index, static_cast<int>(m->nu))) return;
+        if (!isValidIndex(index, static_cast<int>(m->nactuator))) return;
 
         const char* rawName = mj_id2name(m, mjOBJ_ACTUATOR, index);
         result.name = rawName ? QString::fromUtf8(rawName)
@@ -3500,11 +3667,21 @@ ActuatorInfo MujocoQuickItem::actuatorInfo(int index) const
                                   ? QString::fromLatin1(kBiasTypeName[bs])
                                   : QStringLiteral("unknown");
 
-        result.ctrlMin  = m->actuator_ctrlrange[2 * index];
-        result.ctrlMax  = m->actuator_ctrlrange[2 * index + 1];
+        // ctrlrange 是 **按控制分量** 存的（nu x 2）；多输入执行器所有分量共享同一
+        // 区间，所以取第一个分量的即可。
+        const int ctrlAdr = actuatorCtrlAddr(m, index);
+        result.ctrlCount  = actuatorCtrlNum(m, index);
+        result.ctrlMin  = m->actuator_ctrlrange[2 * ctrlAdr];
+        result.ctrlMax  = m->actuator_ctrlrange[2 * ctrlAdr + 1];
         result.forceMin = m->actuator_forcerange[2 * index];
         result.forceMax = m->actuator_forcerange[2 * index + 1];
-        result.gear     = m->actuator_gear[6 * index];
+        // gear 是按力输出编号（nout）存的，多输出执行器要用 outadr 定位
+        result.gear     = m->actuator_gear[6 * actuatorOutAddr(m, index)];
+
+        for (int i = 0; i < result.ctrlCount; ++i) {
+            const char* nm = mj_actuatorInputName(m, index, i);
+            result.inputNames << (nm ? QString::fromUtf8(nm) : QStringLiteral("#%1").arg(i));
+        }
 
         // 提取关联 joint（通过 transmission 的第一个 id）
         const int jntId = m->actuator_trnid[2 * index];
@@ -3523,7 +3700,7 @@ int MujocoQuickItem::actuatorIndex(const QString& name) const
     int idx = -1;
     withSimulation([&](const mjModel* m, mjData*) {
         const int id = mj_name2id(m, mjOBJ_ACTUATOR, name.toUtf8().constData());
-        idx = (id >= 0 && id < static_cast<int>(m->nu)) ? id : -1;
+        idx = (id >= 0 && id < static_cast<int>(m->nactuator)) ? id : -1;
     });
     return idx;
 }
@@ -3532,26 +3709,72 @@ double MujocoQuickItem::control(int index) const
 {
     double val = std::numeric_limits<double>::quiet_NaN();
     withSimulation([&](const mjModel* m, mjData* d) {
-        if (!isValidIndex(index, static_cast<int>(m->nu))) return;
-        val = d->ctrl[index];
+        // index 是 **执行器 id**；多输入执行器没有单一控制值，返回 NaN。
+        // 多值场景请用 controlVector()。
+        if (actuatorCtrlNum(m, index) != 1) return;
+        val = d->ctrl[actuatorCtrlAddr(m, index)];
     });
     return val;
 }
 
-// 写穿到 d->ctrl：在 sim.mtx 锁内把控制值同时写入 staging(ctrl_)、物理数据
-// (d_->ctrl) 与已应用值(ctrl_prev_)，让值在下一个 mj_step 立即生效，而不是攒在
-// ctrl_ 里等下一帧 RenderLoop 的 Sync() 按渲染帧(约60Hz)批量写回——否则 50Hz 的
-// 关节指令与渲染帧相位偶合时会"两帧一起跳"，物理端直线中段冒出随机突起。
-static inline void applyControlImmediately(mujoco::Simulate& sim, int id, double value)
+QVariantList MujocoQuickItem::controlVector(int index) const
 {
-    if (!sim.m_ || id < 0 || id >= static_cast<int>(sim.m_->nu))
-        return;
-    sim.ctrl_[id] = value;
+    QVariantList result;
+    withSimulation([&](const mjModel* m, mjData* d) {
+        const int n = actuatorCtrlNum(m, index);
+        if (n <= 0) return;
+        const int adr = actuatorCtrlAddr(m, index);
+        result.reserve(n);
+        for (int i = 0; i < n; ++i)
+            result.append(d->ctrl[adr + i]);
+    });
+    return result;
+}
+
+// 平铺写入：ctrlIndex 是 mjModel::nu 下标（与 d->ctrl 一一对应）。
+// 在 sim.mtx 锁内把控制值同时写入 staging(ctrl_)、物理数据(d_->ctrl) 与已应用值
+// (ctrl_prev_)，让值在下一个 mj_step 立即生效，而不是攒在 ctrl_ 里等下一帧
+// RenderLoop 的 Sync() 按渲染帧(约60Hz)批量写回——否则 50Hz 的关节指令与渲染帧
+// 相位偶合时会"两帧一起跳"，物理端直线中段冒出随机突起。
+static inline bool applyControlAtCtrlIndex(mujoco::Simulate& sim, int ctrlIndex, double value)
+{
+    if (!sim.m_ || ctrlIndex < 0 || ctrlIndex >= static_cast<int>(sim.m_->nu))
+        return false;
+    // 防御：mj_recompile / 换模型后 staging 可能还是旧尺寸（nu 变大），补齐再写，
+    // 避免越界写 sim.ctrl_ / sim.ctrl_prev_。正常路径下这里是 no-op。
+    const size_t nu = static_cast<size_t>(sim.m_->nu);
+    if (sim.ctrl_.size() < nu)      sim.ctrl_.resize(nu);
+    if (sim.ctrl_prev_.size() < nu) sim.ctrl_prev_.resize(nu);
+    sim.ctrl_[ctrlIndex] = value;
     if (sim.d_)
-        sim.d_->ctrl[id] = value;
-    if (static_cast<size_t>(id) < sim.ctrl_prev_.size())
-        sim.ctrl_prev_[id] = value;
+        sim.d_->ctrl[ctrlIndex] = value;
+    sim.ctrl_prev_[ctrlIndex] = value;
     sim.pending_.ui_update_simulation = true;
+    return true;
+}
+
+// 按 **执行器** 写入单个控制值。仅对单输入执行器（ctrlnum == 1）有效；多输入
+// 执行器（pid/orientation/dcmotor 等）会被拒绝并打印一次警告——静默地只写第一个
+// 分量会造成难以察觉的错位（位置设对了、速度设定值却是脏值），宁可显式失败。
+static inline bool applyActuatorControl(mujoco::Simulate& sim, int actuatorId, double value)
+{
+    const int n = actuatorCtrlNum(sim.m_, actuatorId);
+    if (n != 1) {
+        if (n > 1) {
+            static QStringList warned;
+            const char* raw = mj_id2name(sim.m_, mjOBJ_ACTUATOR, actuatorId);
+            const QString key = raw ? QString::fromUtf8(raw)
+                                    : QString::number(actuatorId);
+            if (!warned.contains(key)) {
+                warned << key;
+                qWarning().noquote()
+                    << "MujocoQuickItem: 执行器" << key << "是多输入执行器(ctrlnum =" << n
+                    << ")，setControl/control 无效，请改用 setControlVector/controlVector";
+            }
+        }
+        return false;
+    }
+    return applyControlAtCtrlIndex(sim, actuatorCtrlAddr(sim.m_, actuatorId), value);
 }
 
 bool MujocoQuickItem::setControl(int index, double value)
@@ -3559,9 +3782,7 @@ bool MujocoQuickItem::setControl(int index, double value)
     bool applied = false;
     withSimulateLocked([&](mujoco::Simulate& sim) {
         if (!sim.m_ || !sim.d_) return;
-        if (!isValidIndex(index, static_cast<int>(sim.m_->nu))) return;
-        applyControlImmediately(sim, index, value);
-        applied = true;
+        applied = applyActuatorControl(sim, index, value);
     });
     return applied;
 }
@@ -3572,8 +3793,21 @@ bool MujocoQuickItem::setControlByName(const QString& name, double value)
     withSimulateLocked([&](mujoco::Simulate& sim) {
         if (!sim.m_ || !sim.d_) return;
         const int id = mj_name2id(sim.m_, mjOBJ_ACTUATOR, name.toUtf8().constData());
-        if (!isValidIndex(id, static_cast<int>(sim.m_->nu))) return;
-        applyControlImmediately(sim, id, value);
+        applied = applyActuatorControl(sim, id, value);
+    });
+    return applied;
+}
+
+bool MujocoQuickItem::setControlVector(int index, const QVariantList& values)
+{
+    bool applied = false;
+    withSimulateLocked([&](mujoco::Simulate& sim) {
+        if (!sim.m_ || !sim.d_) return;
+        const int n = actuatorCtrlNum(sim.m_, index);
+        if (n <= 0 || values.size() != n) return;
+        const int adr = actuatorCtrlAddr(sim.m_, index);
+        for (int i = 0; i < n; ++i)
+            applyControlAtCtrlIndex(sim, adr + i, values[i].toDouble());
         applied = true;
     });
     return applied;
@@ -3583,6 +3817,7 @@ QVariantList MujocoQuickItem::controls() const
 {
     QVariantList result;
     withSimulation([&](const mjModel* m, mjData* d) {
+        // 平铺控制向量：长度 = nu = controlCount()（多输入执行器的分量连续排列）。
         result.reserve(static_cast<int>(m->nu));
         for (int i = 0; i < static_cast<int>(m->nu); ++i)
             result.append(d->ctrl[i]);
@@ -3595,10 +3830,11 @@ bool MujocoQuickItem::setControls(const QVariantList& values)
     bool applied = false;
     withSimulateLocked([&](mujoco::Simulate& sim) {
         if (!sim.m_ || !sim.d_) return;
+        // 平铺控制向量：长度须等于 nu = controlCount()（不是 actuatorCount()）。
         const int nu = static_cast<int>(sim.m_->nu);
         if (values.size() != nu) return;
         for (int i = 0; i < nu; ++i)
-            applyControlImmediately(sim, i, values[i].toDouble());
+            applyControlAtCtrlIndex(sim, i, values[i].toDouble());
         applied = true;
     });
     return applied;
@@ -4650,6 +4886,7 @@ void MujocoQuickItem::physicsThreadMain() {
                 loaded.model = nullptr;
                 m = mnew; d = dnew;
                 mj_forward(m, d);
+                warnOnMultiInputActuators(m, "load");
                 lk.unlock();
                 setLastError(QString());
                 const QString src = file;
@@ -4682,6 +4919,7 @@ void MujocoQuickItem::physicsThreadMain() {
                 loaded.model = nullptr;
                 m = mnew; d = dnew;
                 mj_forward(m, d);
+                warnOnMultiInputActuators(m, "uiload");
                 lk.unlock();
                 setLastError(QString());
                 const QString src = QString::fromLocal8Bit(sim.filename);

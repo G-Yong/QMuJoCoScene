@@ -1,5 +1,6 @@
 #pragma once
 #include <QString>
+#include <QStringList>
 #include <QVector>
 #include <QVector3D>
 #include <QVector4D>
@@ -65,11 +66,15 @@ Q_DECLARE_METATYPE(JointInfo)
 //   3 = dcmotor
 //   4 = user
 //
-// ctrlRange：控制值范围（XML ctrlrange）。
+// ctrlRange：控制值范围（XML ctrlrange）。多输入执行器所有控制分量共享该区间。
 // forceRange：力值范围（XML forcerange）。
-// gear[0]：传动比第一分量。
+// gear[0]：传动比第一分量（按力输出编号定位，多输出执行器取第一个输出）。
 // jointId：关联的 joint id（-1 表示无关联 joint）。
 // jointName：关联的 joint 名称。伺服类 actuator 通过 trnid[0] 绑定 joint。
+// ctrlCount：占用的控制分量个数（普通单输入执行器为 1；pid 默认 2，
+//            orientation 的 expmap / quat 输入分别为 3 / 4）。>1 时
+//            setControl/control 之类的单值接口无效，需用 setControlVector。
+// inputNames：各控制分量的输入名（来自 mj_actuatorInputName，如 "pos"/"vel"/"ff"）。
 // ---------------------------------------------------------------------------
 struct ActuatorInfo {
     Q_GADGET
@@ -87,6 +92,8 @@ struct ActuatorInfo {
     Q_PROPERTY(double  forceMin     MEMBER forceMin     CONSTANT)
     Q_PROPERTY(double  forceMax     MEMBER forceMax     CONSTANT)
     Q_PROPERTY(double  gear         MEMBER gear         CONSTANT)
+    Q_PROPERTY(int        ctrlCount  MEMBER ctrlCount   CONSTANT)
+    Q_PROPERTY(QStringList inputNames MEMBER inputNames CONSTANT)
 public:
     QString name;
     int     trnType      = 0;
@@ -102,6 +109,8 @@ public:
     double  forceMin     = 0.0;
     double  forceMax     = 0.0;
     double  gear         = 0.0;
+    int         ctrlCount  = 1;
+    QStringList inputNames;
 };
 Q_DECLARE_METATYPE(ActuatorInfo)
 

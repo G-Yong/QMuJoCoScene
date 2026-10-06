@@ -627,22 +627,41 @@ public:
     // 写 qpos。例如 position 伺服：ctrl = 目标关节角(rad)；velocity 伺服：
     // ctrl = 目标速度。setControl/setControls 在 sim.mtx 锁内直接写入
     // d->ctrl 并标记 pending 刷新。
+    //
+    // ⚠ 执行器 id ≠ ctrl 下标：MuJoCo 3.11 起一个执行器可占多个 ctrl 分量
+    // （<pid> 的 pos/vel/ff、<orientation> 的 3/4 个输入等），此时
+    // actuatorCount() < controlCount()。单值接口只对单输入执行器有效，
+    // 多输入执行器请用 controlVector/setControlVector（或整体平铺的
+    // controls/setControls）。
 
-    // 返回驱动器数量；场景未加载时返回 0。
+    // 返回驱动器（actuator）个数；场景未加载时返回 0。
     Q_INVOKABLE int actuatorCount() const;
+    // 返回控制分量总数（mjModel::nu）；场景未加载时返回 0。
+    // 所有执行器均为单输入时等于 actuatorCount()。
+    Q_INVOKABLE int controlCount() const;
+    // 返回第 index 个驱动器占用的控制分量个数（单输入执行器为 1）。
+    Q_INVOKABLE int actuatorControlCount(int index) const;
+    // 返回第 index 个驱动器各控制分量的输入名（如 "pos"/"vel"/"ff"）。
+    Q_INVOKABLE QStringList actuatorInputNames(int index) const;
     // 返回第 index 个驱动器的固有属性；index 越界返回空结构。
     Q_INVOKABLE ActuatorInfo actuatorInfo(int index) const;
     // 按名称查找驱动器下标（-1 表示未找到）。
     Q_INVOKABLE int actuatorIndex(const QString& name) const;
-    // 读取第 index 个驱动器的当前 ctrl 值；场景未加载或越界返回 NaN。
+    // 读取第 index 个驱动器的当前 ctrl 值；场景未加载/越界/多输入执行器返回 NaN。
     Q_INVOKABLE double control(int index) const;
-    // 设置第 index 个驱动器的 ctrl 值；返回是否成功写入。
+    // 设置第 index 个驱动器的 ctrl 值；返回是否成功写入
+    // （多输入执行器会被拒绝，详见 setControlVector）。
     Q_INVOKABLE bool setControl(int index, double value);
     // 按名称设置 ctrl 值；返回是否找到并写入。
     Q_INVOKABLE bool setControlByName(const QString& name, double value);
-    // 以 QVariantList 读取全部 ctrl 值。
+    // 读取第 index 个驱动器的全部控制分量（按 ctrladr 连续排列）。
+    Q_INVOKABLE QVariantList controlVector(int index) const;
+    // 写入第 index 个驱动器的全部控制分量；values 长度须等于
+    // actuatorControlCount(index)（单输入执行器即长度 1）。
+    Q_INVOKABLE bool setControlVector(int index, const QVariantList& values);
+    // 以 QVariantList 读取全部平铺 ctrl 分量（长度 = controlCount() = mjModel::nu）。
     Q_INVOKABLE QVariantList controls() const;
-    // 批量设置 ctrl 值；values 长度须与 actuatorCount() 一致。
+    // 批量设置平铺 ctrl 分量；values 长度须与 controlCount() 一致。
     // 返回是否成功写入（false = 场景未加载或长度不匹配）。
     Q_INVOKABLE bool setControls(const QVariantList& values);
 
