@@ -3005,7 +3005,7 @@ int firstMeshGeomOfBody(const mjModel* m, int body)
 } // namespace
 
 int MujocoQuickItem::externalMeshCollisionThunk(const mjModel* m, mjData* d,
-                                                mjContact* con, int g1, int g2,
+                                                mjPreContact* con, int g1, int g2,
                                                 double margin)
 {
     // 全局表是进程级的，被 patch 后所有实例的 mesh×mesh 都会走到这里；
@@ -3046,9 +3046,9 @@ int MujocoQuickItem::externalMeshCollisionThunk(const mjModel* m, mjData* d,
         // 只注入穿透 / 在 margin 内的接触；分离接触交给求解器无意义。
         if (buf[i].dist >= margin) continue;
 
-        mjContact& c = con[written];
-        // 近相位碰撞函数只需填 dist / pos / frame；friction / solref / solimp /
-        // dim / geom 等由 MuJoCo 的 mj_collideGeoms 在返回后补全。
+        mjPreContact& c = con[written];
+        // 近相位碰撞函数只需填 dist / pos / normal / tangent；friction / solref /
+        // solimp / dim / geom / frame 等由 MuJoCo 的 mj_collideGeoms 在返回后补全。
         c.dist   = buf[i].dist;
         c.pos[0] = buf[i].pos[0];
         c.pos[1] = buf[i].pos[1];
@@ -3063,12 +3063,11 @@ int MujocoQuickItem::externalMeshCollisionThunk(const mjModel* m, mjData* d,
         const mjtNum dot = nrm[0]*ref[0] + nrm[1]*ref[1] + nrm[2]*ref[2];
         mjtNum t1[3] = { ref[0] - dot*nrm[0], ref[1] - dot*nrm[1], ref[2] - dot*nrm[2] };
         mju_normalize3(t1);
-        mjtNum t2[3];
-        mju_cross(t2, nrm, t1);
 
-        c.frame[0] = nrm[0]; c.frame[1] = nrm[1]; c.frame[2] = nrm[2];
-        c.frame[3] = t1[0];  c.frame[4] = t1[1];  c.frame[5] = t1[2];
-        c.frame[6] = t2[0];  c.frame[7] = t2[1];  c.frame[8] = t2[2];
+        // 3.9+ 的窄相位接口只交回 normal / tangent；第三行 frame[6..8]
+        // 由 MuJoCo 的 mj_setContact 根据两者算出。
+        c.normal[0]  = nrm[0]; c.normal[1]  = nrm[1]; c.normal[2]  = nrm[2];
+        c.tangent[0] = t1[0];  c.tangent[1] = t1[1];  c.tangent[2] = t1[2];
         ++written;
     }
     return written;

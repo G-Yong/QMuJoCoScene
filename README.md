@@ -69,7 +69,7 @@ Qt Main Thread
 | Component | Version |
 |---|---|
 | Qt | 5.15.2 (requires `quick` and `opengl` modules) |
-| MuJoCo | 3.8.1 Windows x86_64 |
+| MuJoCo | 3.15.0 Windows x86_64 |
 | Compiler | MSVC 2019 64-bit (`/utf-8`) |
 | OpenGL | 3.3 Compatibility Profile |
 
@@ -175,23 +175,30 @@ were added to `Simulate`, then exposed to QML through the
 ### Upgrade Steps
 
 Both patches touch `simulate/simulate.cc` (and `status-overlay.patch` also modifies
-`simulate/simulate.h`). Their paths embed the currently vendored version directory
-(`mujoco-3.8.1-windows-x86_64/...`), so `git apply --directory=...` does **not** work —
-rewrite the version prefix into temporary copies and apply from the repository root:
+`simulate/simulate.h`). The files in `patches/` always target the **currently vendored**
+release and embed its directory name (`mujoco-3.15.0-windows-x86_64/...`), so
+`git apply --directory=...` does **not** work — rewrite the version prefix into temporary
+copies and apply from the repository root. Patches for older releases are kept under
+`patches/<version>/`.
 
-1. Place the new `mujoco-X.Y.Z-windows-x86_64/` directory alongside this repository and update `MUJOCO_DIR` in `src/QMuJoCoScene.pri`.
+1. Place the new `mujoco-X.Y.Z-windows-x86_64/` directory alongside this repository and update `MUJOCO_DIR` in `src/qmujocoscene.pri`.
 2. From the repository root, run (replace `X.Y.Z` with the actual new version):
    ```bash
-   sed 's/mujoco-3\.8\.1-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
+   sed 's/mujoco-3\.15\.0-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
        patches/status-overlay.patch        > /tmp/status-overlay.patch
-   sed 's/mujoco-3\.8\.1-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
+   sed 's/mujoco-3\.15\.0-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
        patches/user-scn-managed-mode.patch > /tmp/user-scn-managed-mode.patch
 
-   git apply /tmp/status-overlay.patch
-   git apply /tmp/user-scn-managed-mode.patch
+   git apply --ignore-whitespace /tmp/status-overlay.patch
+   git apply --ignore-whitespace /tmp/user-scn-managed-mode.patch
    ```
-   If a patch fails due to context drift (typically on larger version jumps), merge
-   manually using the change sites below.
+   `--ignore-whitespace` is required because upstream runs clang-format across releases,
+   which realigns identifiers and re-wraps long calls; the change sites themselves do not
+   move. Two further caveats:
+   - Upstream source archives are LF while the vendored trees here are CRLF — normalize
+     line endings first, otherwise `git apply` rejects the context wholesale.
+   - If `git apply` still refuses a hunk, use `git apply --reject` and merge the leftovers
+     in `*.rej` by hand against the change sites below.
 
 3. `patches/status-overlay.patch` — **6 change sites** (4 in `simulate.cc`, 2 in `simulate.h`):
    - `simulate.h`: add the `status_overlay` field below `pause_update`; add the `status_overlay_text` field below `load_error`.

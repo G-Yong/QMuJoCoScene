@@ -57,6 +57,8 @@ struct mjData_;
 typedef mjData_ mjData;
 struct mjContact_;
 typedef mjContact_ mjContact;
+struct mjPreContact_;
+typedef mjPreContact_ mjPreContact;
 struct mjSpec_;
 typedef mjSpec_ mjSpec;
 struct mjvScene_;
@@ -1206,8 +1208,9 @@ private:
     ExternalNarrowPhaseFn m_extNarrowPhase;
 
     // 装进 mjCOLLISIONFUNC[mjGEOM_MESH][mjGEOM_MESH] 的跳板（C 函数指针签名）。
+    // MuJoCo 3.9 起窄相位回调收 mjPreContact*（不再是 mjContact*）。
     static int externalMeshCollisionThunk(const mjModel* m, mjData* d,
-                                          mjContact* con, int g1, int g2,
+                                          mjPreContact* con, int g1, int g2,
                                           double margin);
     // 按传入的 mjModel* 在 s_narrowPhaseHosts 中反查对应实例；找不到返回 nullptr。
     static MujocoQuickItem* hostForModel(const mjModel* m);

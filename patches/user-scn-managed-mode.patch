@@ -1,8 +1,8 @@
-diff --git a/mujoco-3.8.1-windows-x86_64/simulate/simulate.cc b/mujoco-3.8.1-windows-x86_64/simulate/simulate.cc
-index 22d7bba..f88502e 100644
---- a/mujoco-3.8.1-windows-x86_64/simulate/simulate.cc
-+++ b/mujoco-3.8.1-windows-x86_64/simulate/simulate.cc
-@@ -2307,6 +2307,33 @@ void Simulate::Sync(bool state_only) {
+diff --git a/mujoco-3.15.0-windows-x86_64/simulate/simulate.cc b/mujoco-3.15.0-windows-x86_64/simulate/simulate.cc
+index cc94fb1..6300c38 100644
+--- a/mujoco-3.15.0-windows-x86_64/simulate/simulate.cc
++++ b/mujoco-3.15.0-windows-x86_64/simulate/simulate.cc
+@@ -2349,6 +2349,33 @@ void Simulate::Sync(bool state_only) {
    // update scene or sync data from user in passive mode
    if (!is_passive_) {
      mjv_updateScene(m_, d_, &this->opt, &this->pert, &this->cam, mjCAT_ALL, &this->scn);
@@ -35,4 +35,4 @@ index 22d7bba..f88502e 100644
 +    }
    } else {
      if (state_only) {
-       int state_size = mj_stateSize(m_, mjSTATE_INTEGRATION);
+       int     state_size = mj_stateSize(m_, mjSTATE_INTEGRATION);
