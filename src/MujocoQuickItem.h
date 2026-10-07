@@ -49,7 +49,6 @@
 
 class QOpenGLContext;
 class QOffscreenSurface;
-class QTemporaryFile;
 
 struct mjModel_;
 typedef mjModel_ mjModel;
@@ -194,10 +193,14 @@ public:
     //   阶段的输入校验)，实际加载结果通过 sceneLoaded / sceneLoadFailed
     //   信号异步通知。
     Q_INVOKABLE bool loadScene(const QString& filename);
-    // loadSceneFromData: 从内存缓冲加载场景。format 指定数据格式，可取
-    //   "xml" 或 "mjb"。内部通过临时文件方式转交给 mujoco 加载流程。
+    // loadSceneFromData: 从内存缓冲加载场景，不落盘。format 指定数据格式，
+    //   可取 "xml" 或 "mjb"：xml 走 mj_parseXMLString + mj_compile，
+    //   mjb 走 mj_loadModelBuffer。XML 里引用的 mesh/texture 仍按其中 file=
+    //   指向的路径从磁盘读取（本工程生成的是绝对路径）。
     Q_INVOKABLE bool loadSceneFromData(const QByteArray& data,
                                        const QString& format = QStringLiteral("xml"));
+    // loadSceneFromXml: QML 友好的便捷入口（QML 字符串 → UTF-8 缓冲）。
+    Q_INVOKABLE bool loadSceneFromXml(const QString& xml);
     // closeScene: 关闭当前场景并释放渲染/物理线程及相关资源。
     Q_INVOKABLE void closeScene();
     // lastError: 最近一次加载失败的错误信息 (中文/英文均可，由底层提供)。
@@ -1045,14 +1048,13 @@ private:
     int               m_historyDepthEmitted = 0;
 
     std::mutex        m_pendingMtx;
-    QString           m_pendingFile;
+    QString           m_pendingFile;      // 磁盘路径（loadScene 使用）
+    QByteArray        m_pendingData;      // 内存缓冲（loadSceneFromData 使用，非空时优先）
+    QString           m_pendingFormat;    // 内存缓冲格式："xml" / "mjb"
     std::atomic<bool> m_hasPendingLoad {false};
 
     mutable std::mutex m_errorMtx;
     QString            m_lastError;
-
-    // loadSceneFromData 写入的临时文件，需保持存活直到下次加载或关闭。
-    std::unique_ptr<QTemporaryFile> m_tempSceneFile;
 
     // 接触快照：由 onFrameRendered() 在主线程按需更新，contactCount()/contact()/contacts() 读取。
     // 仅在主线程访问，无需额外锁。

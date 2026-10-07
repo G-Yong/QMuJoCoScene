@@ -27,8 +27,6 @@
 #include <QtMath>
 #include <QSGSimpleTextureNode>
 #include <QFileInfo>
-#include <QTemporaryFile>
-#include <QStandardPaths>
 #include <QDir>
 #include <QPainter>
 #include <QImage>
@@ -519,13 +517,14 @@ void MujocoQuickItem::closeScene() {
     }
     m_adapterRaw = nullptr;
 
-    // 清理待加载请求和临时文件
+    // 清理待加载请求
     {
         std::lock_guard<std::mutex> lk(m_pendingMtx);
         m_pendingFile.clear();
+        m_pendingData.clear();
+        m_pendingFormat.clear();
     }
     m_hasPendingLoad.store(false);
-    m_tempSceneFile.reset();
 }
 
 bool MujocoQuickItem::loadScene(const QString& filename) {
@@ -546,31 +545,11 @@ bool MujocoQuickItem::loadScene(const QString& filename) {
     {
         std::lock_guard<std::mutex> lk(m_pendingMtx);
         m_pendingFile = filename;
+        m_pendingData.clear();
+        m_pendingFormat.clear();
     }
     m_hasPendingLoad.store(true);
     return true;
-}
-
-// 逐个候选实际建文件验证后返回可用目录；QFileInfo::isWritable() 在受限令牌/沙箱下
-// 会谎报 true（ACL 允许但低完整性令牌写 Medium 目录仍 ACCESS_DENIED）。全失败返回空串。
-static QString writableSceneTempDir()
-{
-    QStringList candidates;
-    candidates << QDir::tempPath()
-               << QStandardPaths::writableLocation(QStandardPaths::TempLocation)
-               << QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
-               << QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
-               << QDir::currentPath();
-    candidates.removeAll(QString());
-    candidates.removeDuplicates();
-
-    for (const QString& dir : candidates) {
-        QDir().mkpath(dir);
-        QTemporaryFile probe(dir + QStringLiteral("/mujoco_scene_probe_XXXXXX.tmp"));
-        if (probe.open())
-            return dir;
-    }
-    return QString();
 }
 
 bool MujocoQuickItem::loadSceneFromData(const QByteArray& data, const QString& format) {
@@ -592,69 +571,25 @@ bool MujocoQuickItem::loadSceneFromData(const QByteArray& data, const QString& f
         return false;
     }
 
-    // 临时文件需保留实例存活，以便 mujoco 异步加载期间文件不会被删除。
-    const QString tempDir = writableSceneTempDir();
-    if (tempDir.isEmpty()) {
-        const QString err = QStringLiteral("No writable directory for temporary scene file "
-                                           "(tried %TEMP%, cache and working directory)");
-        qWarning() << "MujocoQuickItem:" << err;
-        setLastError(err);
-        emit sceneLoadFailed(err);
-        return false;
-    }
-    if (tempDir != QDir::tempPath()) {
-        static bool loggedFallback = false;
-        if (!loggedFallback) {
-            loggedFallback = true;
-            qWarning().noquote() << "MujocoQuickItem: %TEMP%(" << QDir::tempPath()
-                                 << ") 不可写（受限令牌/沙箱），临时场景文件改用:" << tempDir;
-        }
-    }
-
-    std::unique_ptr<QTemporaryFile> tmp;
-    QString openErr;
-    for (int attempt = 0; attempt < 5; ++attempt) {
-        tmp.reset(new QTemporaryFile(
-            tempDir + QStringLiteral("/mujoco_scene_XXXXXX.") + suffix));
-        tmp->setAutoRemove(true);
-        if (tmp->open()) { openErr.clear(); break; }
-        openErr = tmp->errorString();
-        tmp.reset();
-        QThread::msleep(20);
-    }
-    if (!tmp) {
-        const QString err = QStringLiteral("Failed to create temporary scene file in %1: %2")
-                                .arg(tempDir, openErr);
-        qWarning() << "MujocoQuickItem:" << err;
-        setLastError(err);
-        emit sceneLoadFailed(err);
-        return false;
-    }
-    if (tmp->write(data) != data.size()) {
-        const QString err = QStringLiteral("Failed to write scene data to temporary file: %1").arg(tmp->errorString());
-        qWarning() << "MujocoQuickItem:" << err;
-        setLastError(err);
-        emit sceneLoadFailed(err);
-        return false;
-    }
-    tmp->flush();
-    const QString tmpPath = tmp->fileName();
-    tmp->close();
-
     if (!ensureBackendStarted()) {
         emit sceneLoadFailed(lastError());
         return false;
     }
 
-    // 保活：新临时文件覆盖之前的，物理线程加载完成后旧文件可被回收。
-    m_tempSceneFile = std::move(tmp);
-
+    // 直接把缓冲交给物理线程，由它走 mj_parseXMLString / mj_loadModelBuffer。
+    // 写入时清空 m_pendingFile，保证“内存”与“磁盘路径”两种请求互斥。
     {
         std::lock_guard<std::mutex> lk(m_pendingMtx);
-        m_pendingFile = tmpPath;
+        m_pendingData   = data;
+        m_pendingFormat = suffix;
+        m_pendingFile.clear();
     }
     m_hasPendingLoad.store(true);
     return true;
+}
+
+bool MujocoQuickItem::loadSceneFromXml(const QString& xml) {
+    return loadSceneFromData(xml.toUtf8(), QStringLiteral("xml"));
 }
 
 void MujocoQuickItem::withSimulation(std::function<void(const mjModel*, mjData*)> callback) const {
@@ -4852,6 +4787,33 @@ LoadedModel loadModelFile(const QString& filename, mujoco::Simulate& sim) {
     }
     return result;
 }
+
+// 从内存缓冲加载：XML 走 mj_parseXMLString + mj_compile，MJB 走 mj_loadModelBuffer。
+// 与 loadModelFile 保持同样的语义：失败写 sim.load_error，成功时 xml 分支填 spec
+// （调用方会存进 m_editSpec，saveSceneAsXml / addPrimitive / mj_recompile 依赖它）。
+LoadedModel loadModelData(const QByteArray& data, const QString& format, mujoco::Simulate& sim) {
+    char err[kErrorLength] = "";
+    LoadedModel result;
+    if (format.compare(QLatin1String("mjb"), Qt::CaseInsensitive) == 0) {
+        result.model = mj_loadModelBuffer(data.constData(), data.size());
+        if (!result.model) std::strncpy(err, "could not load binary model from buffer", sizeof(err) - 1);
+    } else {
+        // QByteArray::constData() 保证以 '\0' 结尾，可以直接当 C 字符串传给 mujoco。
+        result.spec = mj_parseXMLString(data.constData(), nullptr, err, sizeof(err));
+        if (result.spec) {
+            result.model = mj_compile(result.spec, nullptr);
+            if (!result.model) {
+                const char* specErr = mjs_getError(result.spec);
+                if (specErr && specErr[0]) std::strncpy(err, specErr, sizeof(err) - 1);
+            }
+        }
+    }
+    if (!result.model) {
+        std::strncpy(sim.load_error, err, sizeof(sim.load_error) - 1);
+        std::printf("loadModel error: %s\n", err);
+    }
+    return result;
+}
 } // namespace
 
 void MujocoQuickItem::physicsThreadMain() {
@@ -4868,14 +4830,24 @@ void MujocoQuickItem::physicsThreadMain() {
 
     while (!sim.exitrequest.load() && m_running.load()) {
         if (m_hasPendingLoad.exchange(false)) {
-            QString file;
-            { std::lock_guard<std::mutex> lk(m_pendingMtx); file = m_pendingFile; }
-            sim.LoadMessage(file.toUtf8().constData());
-            LoadedModel loaded = loadModelFile(file, sim);
+            QString file, format;
+            QByteArray data;
+            {
+                std::lock_guard<std::mutex> lk(m_pendingMtx);
+                data   = m_pendingData;
+                format = m_pendingFormat;
+                file   = m_pendingFile;
+            }
+            // 内存缓冲优先；为空则退回按磁盘文件加载。
+            const bool fromData = !data.isEmpty();
+            const QString source = fromData ? QStringLiteral("<memory>") : file;
+            sim.LoadMessage(source.toUtf8().constData());
+            LoadedModel loaded = fromData ? loadModelData(data, format, sim)
+                                          : loadModelFile(file, sim);
             mjModel* mnew = loaded.model;
             mjData*  dnew = mnew ? mj_makeData(mnew) : nullptr;
             if (dnew) {
-                sim.Load(mnew, dnew, file.toUtf8().constData());
+                sim.Load(mnew, dnew, source.toUtf8().constData());
                 m_historyDepth.store(0);   // 新模型：history 缓冲已重建，回退深度归零
                 std::unique_lock<std::recursive_mutex> lk(sim.mtx);
                 if (d) mj_deleteData(d);
@@ -4889,7 +4861,7 @@ void MujocoQuickItem::physicsThreadMain() {
                 warnOnMultiInputActuators(m, "load");
                 lk.unlock();
                 setLastError(QString());
-                const QString src = file;
+                const QString src = source;
                 QMetaObject::invokeMethod(this, [this, src]{ emit sceneLoaded(src); },
                                           Qt::QueuedConnection);
             } else {
