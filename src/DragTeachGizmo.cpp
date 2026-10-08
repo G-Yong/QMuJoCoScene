@@ -284,9 +284,10 @@ int DragTeachGizmo::rebuildGeoms(mjvScene* userScene, int startIndex) {
             b->rgba.insert(b->rgba.end(), {color[0], color[1], color[2], color[3]});
     };
 
-    auto addLine = [&](const QVector3D& p0, const QVector3D& p1,
-                       const float color[4], float widthPx) {
-        if (m_alwaysOnTop) { pushOverlay(p0, p1, color, widthPx); return; }
+    // 直写 user_scn 的线段：交给 MuJoCo 正常管线渲染，参与深度测试（会被场景物体遮挡），
+    // 与 TCP 轨迹走同一套渲染路径 —— 不受 always-on-top 叠加层影响。
+    auto addSceneLine = [&](const QVector3D& p0, const QVector3D& p1,
+                            const float color[4], float widthPx) {
         if (g >= maxg) return;
         mjvGeom* geom = &userScene->geoms[g];
         mjv_initGeom(geom, mjGEOM_LINE, nullptr, nullptr, nullptr, color);
@@ -296,13 +297,26 @@ int DragTeachGizmo::rebuildGeoms(mjvScene* userScene, int startIndex) {
         ++g;
     };
 
-    // 拖动某轴时，沿该轴画一条贯穿全场的辅助线（平移沿平移轴 / 旋转沿旋转轴）。
-    if (dragT || dragR) {
-        const int ax = m_dragAxis;
-        const QVector3D gdir = axisVec(ax);
-        const float gcolor[4] = { kBase[ax][0], kBase[ax][1], kBase[ax][2], 1.0f };
-        addLine(c - gdir * kGuideLineHalfLen, c + gdir * kGuideLineHalfLen,
-                gcolor, kGuideLineWidthPx);
+    auto addLine = [&](const QVector3D& p0, const QVector3D& p1,
+                       const float color[4], float widthPx) {
+        if (m_alwaysOnTop) { pushOverlay(p0, p1, color, widthPx); return; }
+        addSceneLine(p0, p1, color, widthPx);
+    };
+
+    // 拖动某轴时，沿该轴画一条贯穿全场的辅助线（平移沿平移轴 / 旋转沿旋转轴）；
+    // 平面拖动是两轴联动，所以对应平面的**两个轴**都画辅助线（各用自己的轴色）。
+    // 这些线**始终写进 user_scn、参与深度测试**（会被场景物体遮挡），与 TCP 轨迹一致；
+    // 不走 always-on-top 叠加层，否则它们会永远盖在物体最前面。
+    if (dragT || dragR || dragP) {
+        int guideAxes[2] = { m_dragAxis, m_dragAxisB };
+        const int guideCount = dragP ? 2 : 1;
+        for (int i = 0; i < guideCount; ++i) {
+            const int ax = guideAxes[i];
+            const QVector3D gdir = axisVec(ax);
+            const float gcolor[4] = { kBase[ax][0], kBase[ax][1], kBase[ax][2], 1.0f };
+            addSceneLine(c - gdir * kGuideLineHalfLen, c + gdir * kGuideLineHalfLen,
+                         gcolor, kGuideLineWidthPx);
+        }
     }
 
     // 平移箭头：只画正半轴（handle 1/3/5，仿 Blender）；旋转拖动时整体隐藏。
