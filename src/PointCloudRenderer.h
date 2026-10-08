@@ -58,7 +58,13 @@ public:
 
     // 开始一帧：绑定目标 FBO、设置视口、复制 MuJoCo 的投影/视图/深度状态。
     // averagedCamera 的字段来自 mjv_averageCamera 的结果（见 .cpp）。
+    // viewportW/H：整个 FBO 的像素尺寸（glViewport 仍用整幅，保证点大小/倒影等
+    //   像素空间逻辑不变）。
+    // sceneX/Y/W/H：3D 场景在该 FBO 里的实际视口。MuJoCo UI 左右侧栏存在时会 inset
+    //   （simulate.cc::UiLayout 的 uistate.rect[3]）。投影按 scene 的宽高比构造，并
+    //   叠加"场景视口 → 整幅"的裁剪空间变换，使叠加层与 mjr_render 逐像素对齐。
     void beginFrame(unsigned int targetFbo, int viewportW, int viewportH,
+                    int sceneX, int sceneY, int sceneW, int sceneH,
                     const float camPos[3], const float camForward[3],
                     const float camUp[3],
                     float frustumCenter, float frustumWidth,
@@ -67,6 +73,20 @@ public:
                     bool orthographic,
                     bool sceneTransform, const float translate[3],
                     const float rotateQuat[4], float scale);
+
+    // 与 mujoco render_gl3.c::setView() 一致地求投影半宽：相机自带 frustum_width
+    // 非 0 时用它，否则按"场景视口"宽高比展开。（MuJoCo 自己渲染时忽略 frustum_width，
+    // 该分支只为兼容历史行为；正常情况 frustum_width == 0。）
+    static float projectionHalfWidth(float frustumWidth, float frustumBottom,
+                                     float frustumTop, float sceneW, float sceneH);
+
+    // 把"场景视口"(sceneX/Y/W/H) 映射到"整幅视口"(fullW/H) 的裁剪空间变换 S：
+    // s' = S * s，使 s 在整幅 glViewport 下渲染出与 inset 视口完全相同的位置。
+    // CPU 侧投影（DragTeachGizmo::worldToScreen）也用它，保证命中/读数与渲染一致。
+    // scene 等于整幅时返回单位阵。
+    static QMatrix4x4 viewportInsetMatrix(float sceneX, float sceneY,
+                                          float sceneW, float sceneH,
+                                          float fullW, float fullH);
 
     // 绘制一个点云。pointSize：Pixel 样式为像素，其余为世界半径（米）。
     // uniformColor 在该点云没有逐点颜色时使用。

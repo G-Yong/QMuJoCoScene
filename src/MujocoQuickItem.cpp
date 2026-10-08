@@ -1363,6 +1363,24 @@ void MujocoQuickItem::rebuildTrajectoryGeomsLocked() {
     m_userScene->ngeom = m_axisGizmo.rebuildGeoms(m_userScene, afterMain);
 }
 
+void MujocoQuickItem::gizmoSceneViewportLocked(float& x, float& y,
+                                               float& w, float& h) const {
+    x = 0.0f; y = 0.0f; w = float(width()); h = float(height());
+    if (!m_sim) return;
+    const mjuiState& st = m_sim->uistate;
+    if (st.nrect <= 3) return;
+    const mjrRect& scene = st.rect[3];
+    const mjrRect& full  = st.rect[0];
+    if (scene.width <= 0 || scene.height <= 0 || full.width <= 0 || full.height <= 0)
+        return;
+    // 设备像素 → item 逻辑像素（= 逻辑宽度 / 帧缓冲宽度）。
+    const float s = float(width()) / float(full.width);
+    x = float(scene.left)   * s;
+    y = float(scene.bottom) * s;   // GL 约定：原点在左下
+    w = float(scene.width)  * s;
+    h = float(scene.height) * s;
+}
+
 bool MujocoQuickItem::buildGizmoCameraLocked(QMatrix4x4& viewProj, QVector3D& camPos) const {
     if (!m_sim) return false;
     const float w = float(width());
@@ -1388,10 +1406,16 @@ bool MujocoQuickItem::buildGizmoCameraLocked(QMatrix4x4& viewProj, QVector3D& ca
         view.scale(scn.scale);
     }
 
-    const float aspect = w / h;
+    // 3D 场景在 FBO 里的实际视口（MuJoCo UI 左右侧栏存在时会 inset）：投影按它的
+    // 宽高比构造，再叠加"场景视口 → 整幅"的裁剪空间变换，使屏幕投影（命中/读数/
+    // 恒定尺寸）与 mjr_render / 点云叠加层逐像素一致。
+    float sx = 0.0f, sy = 0.0f, sw = w, sh = h;
+    gizmoSceneViewportLocked(sx, sy, sw, sh);
+
     const float top = cam.frustum_top;
     const float bottom = cam.frustum_bottom;
-    const float halfW = 0.5f * (top - bottom) * aspect;
+    const float halfW = PointCloudRenderer::projectionHalfWidth(
+        cam.frustum_width, bottom, top, sw, sh);
     const float left = cam.frustum_center - halfW;
     const float right = cam.frustum_center + halfW;
 
@@ -1401,7 +1425,7 @@ bool MujocoQuickItem::buildGizmoCameraLocked(QMatrix4x4& viewProj, QVector3D& ca
     else
         proj.frustum(left, right, bottom, top, cam.frustum_near, cam.frustum_far);
 
-    viewProj = proj * view;
+    viewProj = PointCloudRenderer::viewportInsetMatrix(sx, sy, sw, sh, w, h) * proj * view;
     camPos = pos;
     return true;
 }
@@ -2131,8 +2155,24 @@ void MujocoQuickItem::onRenderOverlay(unsigned int targetFbo, int viewWidth, int
     const mjvScene& scn = m_sim->scn;
     mjvGLCamera cam = mjv_averageCamera(&scn.camera[0], &scn.camera[1]);
 
+    // 3D 场景在离屏 FBO 里的实际视口：MuJoCo UI 左右侧栏存在时会被 inset
+    //（simulate.cc::UiLayout 的 uistate.rect[3]）。叠加层必须按同一视口投影，
+    // 否则 gizmo/点云会相对场景整体偏移一个侧栏宽度（辅助线在 user_scn 里由
+    // mjr_render 画，所以不受影响 —— 这正是当初看起来"只有 gizmo 偏了"的原因）。
+    int sceneX = 0, sceneY = 0, sceneW = viewWidth, sceneH = viewHeight;
+    {
+        const mjuiState& st = m_sim->uistate;
+        if (st.nrect > 3) {
+            const mjrRect& r = st.rect[3];
+            if (r.width > 0 && r.height > 0) {
+                sceneX = r.left;   sceneY = r.bottom;
+                sceneW = r.width;  sceneH = r.height;
+            }
+        }
+    }
     m_pointRenderer->beginFrame(
         targetFbo, viewWidth, viewHeight,
+        sceneX, sceneY, sceneW, sceneH,
         cam.pos, cam.forward, cam.up,
         cam.frustum_center, cam.frustum_width, cam.frustum_bottom, cam.frustum_top,
         cam.frustum_near, cam.frustum_far, cam.orthographic != 0,

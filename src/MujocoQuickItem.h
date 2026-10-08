@@ -1184,11 +1184,16 @@ private:
     // 必须在 m_sim->mtx 锁内调用：把 m_userScene 尾部的轨迹段全部重建
     //（末尾再让 m_gizmo.rebuildGeoms 追加 gizmo 段并写 ngeom）。
     void rebuildTrajectoryGeomsLocked();
-    // 在 m_sim->mtx 锁内调用：由 scn 相机构造 view*proj 矩阵（视口取 width()/height()），
-    // 并输出世界相机位置。返回 false 表示相机/尺寸不可用。
-    // 与 render_gl3.c 的 setView() 对齐：左右边界按 frustum_top/bottom × 宽高比展开
+    // 在 m_sim->mtx 锁内调用：3D 场景在 FBO 里的实际视口（MuJoCo UI 左右侧栏会把
+    // 场景挤到中间，见 simulate.cc::UiLayout 的 uistate.rect[3]），换算到 item 逻辑
+    // 像素、GL 约定（原点在左下）。拿不到时回退为整幅 (0, 0, width(), height())。
+    void gizmoSceneViewportLocked(float& x, float& y, float& w, float& h) const;
+    // 在 m_sim->mtx 锁内调用：由 scn 相机构造 view*proj 矩阵（视口取场景矩形，
+    // 不是整幅 width()/height()），并输出世界相机位置。返回 false 表示相机/尺寸不可用。
+    // 与 render_gl3.c 的 setView() 对齐：左右边界按 frustum_top/bottom × 场景宽高比展开
     //（mjvGLCamera::frustum_width 注释就是 "not used for rendering"），并叠加
-    // scn.translate/rotate/scale 这个场景变换（enabletransform 打开时）。
+    // scn.translate/rotate/scale 这个场景变换（enabletransform 打开时）；若场景被
+    // MuJoCo UI 侧栏 inset，再叠加"场景视口 → 整幅"的裁剪空间变换。
     bool buildGizmoCameraLocked(QMatrix4x4& viewProj, QVector3D& camPos) const;
     // 必须在 m_sim->mtx 锁内调用：采样 TCP 的世界坐标与它在 item 逻辑像素坐标里的位置。
     // 返回 false 表示当前不该显示读数（gizmo 不可见 / 位姿无效 / 相机不可用 / 在相机背后）。

@@ -475,7 +475,34 @@ void PointCloudRenderer::retainOnly(const std::vector<int>& keepIds) {
     }
 }
 
+float PointCloudRenderer::projectionHalfWidth(float frustumWidth, float frustumBottom,
+                                              float frustumTop, float sceneW, float sceneH) {
+    if (frustumWidth != 0.0f) return frustumWidth;
+    const float span = frustumTop - frustumBottom;
+    if (sceneH > 0.0f) return 0.5f * span * (sceneW / sceneH);
+    return 0.5f * span;
+}
+
+QMatrix4x4 PointCloudRenderer::viewportInsetMatrix(float sceneX, float sceneY,
+                                                   float sceneW, float sceneH,
+                                                   float fullW, float fullH) {
+    QMatrix4x4 m;   // 单位阵 = 无 inset（场景即整幅视口）
+    if (fullW <= 0.0f || fullH <= 0.0f || sceneW <= 0.0f || sceneH <= 0.0f)
+        return m;
+    // 期望像素 px = sceneX + (s+1)/2*sceneW，整幅下 px = (s'+1)/2*fullW
+    //   ⇒ s' = (sceneW/fullW)*s + (2*sceneX + sceneW)/fullW - 1
+    const float ax = sceneW / fullW;
+    const float ay = sceneH / fullH;
+    const float bx = (2.0f * sceneX + sceneW) / fullW - 1.0f;
+    const float by = (2.0f * sceneY + sceneH) / fullH - 1.0f;
+    m.setToIdentity();
+    m(0, 0) = ax;  m(0, 3) = bx;
+    m(1, 1) = ay;  m(1, 3) = by;
+    return m;
+}
+
 void PointCloudRenderer::beginFrame(unsigned int targetFbo, int viewportW, int viewportH,
+                                    int sceneX, int sceneY, int sceneW, int sceneH,
                                     const float camPos[3], const float camForward[3],
                                     const float camUp[3],
                                     float frustumCenter, float frustumWidth,
@@ -509,11 +536,10 @@ void PointCloudRenderer::beginFrame(unsigned int targetFbo, int viewportW, int v
         m_view.scale(scale);
     }
 
-    // 投影：halfwidth 匹配视口宽高比（与 MuJoCo 完全一致）。
-    const float halfwidth = frustumWidth != 0.0f
-        ? frustumWidth
-        : 0.5f * static_cast<float>(viewportW) / static_cast<float>(viewportH) *
-              (frustumTop - frustumBottom);
+    // 投影：halfwidth 匹配"场景视口"的宽高比（与 mjr_render 的 rect[3] 一致）。
+    const float halfwidth = projectionHalfWidth(
+        frustumWidth, frustumBottom, frustumTop,
+        static_cast<float>(sceneW), static_cast<float>(sceneH));
     const float left  = frustumCenter - halfwidth;
     const float right = frustumCenter + halfwidth;
 
@@ -541,14 +567,19 @@ void PointCloudRenderer::beginFrame(unsigned int targetFbo, int viewportW, int v
         m_clipZeroToOne = false;
     }
     m_proj = zflip * frustum;
+    // 场景在 FBO 里 inset（MuJoCo UI 侧栏）时，把"场景视口 → 整幅"的裁剪空间
+    // 变换叠加到投影上：glViewport 仍用整幅（点大小/倒影等像素空间逻辑不变），
+    // 但内容只落在 rect[3] 内，与 mjr_render 逐像素对齐。
+    m_proj = viewportInsetMatrix(static_cast<float>(sceneX), static_cast<float>(sceneY),
+                                 static_cast<float>(sceneW), static_cast<float>(sceneH),
+                                 static_cast<float>(viewportW), static_cast<float>(viewportH))
+             * m_proj;
 
     // 从深度反算世界坐标用的逆矩阵（散射倒影遮挡深度用）。
     m_invViewProj = (m_proj * m_view).inverted();
 
-    // 世界尺寸 → 像素换算系数。
-    m_projYY = orthographic
-        ? 2.0f / (frustumTop - frustumBottom)
-        : 2.0f * frustumNear / (frustumTop - frustumBottom);
+    // 世界尺寸 → 像素换算系数（= 投影矩阵 y 缩放，已含上面的 inset 变换）。
+    m_projYY = m_proj(1, 1);
 
     // --- GL 状态 -------------------------------------------------------
     gl->glBindFramebuffer(GL_FRAMEBUFFER, targetFbo);
