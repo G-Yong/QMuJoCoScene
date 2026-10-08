@@ -1363,22 +1363,45 @@ void MujocoQuickItem::rebuildTrajectoryGeomsLocked() {
     m_userScene->ngeom = m_axisGizmo.rebuildGeoms(m_userScene, afterMain);
 }
 
+void MujocoQuickItem::refreshSceneViewportCache() {
+    // 渲染线程专用：uistate 只在该线程被写（UiModify / OnWindowResize 都经 adapter
+    // 事件队列在 PollEvents 里执行，SetWindowGeometry 只存原子量）。
+    int fullW = 0, sx = 0, sy = 0, sw = 0, sh = 0;
+    if (m_sim) {
+        const mjuiState& st = m_sim->uistate;
+        if (st.nrect > 0 && st.rect[0].width > 0 && st.rect[0].height > 0) {
+            fullW = st.rect[0].width;
+            sx = 0; sy = 0; sw = fullW; sh = st.rect[0].height;
+            if (st.nrect > 3 && st.rect[3].width > 0 && st.rect[3].height > 0) {
+                sx = st.rect[3].left;
+                sy = st.rect[3].bottom;
+                sw = st.rect[3].width;
+                sh = st.rect[3].height;
+            }
+        }
+    }
+    m_fullVpW .store(fullW, std::memory_order_relaxed);
+    m_sceneVpX.store(sx,    std::memory_order_relaxed);
+    m_sceneVpY.store(sy,    std::memory_order_relaxed);
+    m_sceneVpW.store(sw,    std::memory_order_relaxed);
+    m_sceneVpH.store(sh,    std::memory_order_relaxed);
+}
+
 void MujocoQuickItem::gizmoSceneViewportLocked(float& x, float& y,
                                                float& w, float& h) const {
     x = 0.0f; y = 0.0f; w = float(width()); h = float(height());
-    if (!m_sim) return;
-    const mjuiState& st = m_sim->uistate;
-    if (st.nrect <= 3) return;
-    const mjrRect& scene = st.rect[3];
-    const mjrRect& full  = st.rect[0];
-    if (scene.width <= 0 || scene.height <= 0 || full.width <= 0 || full.height <= 0)
-        return;
+    // 场景视口由渲染线程缓存在原子量里（refreshSceneViewportCache），这里只读，
+    // 避免 GUI 线程直接读 m_sim->uistate。尚未缓存（全 0）→ 保持整幅回退。
+    const int fullW = m_fullVpW .load(std::memory_order_relaxed);
+    const int sw    = m_sceneVpW.load(std::memory_order_relaxed);
+    const int sh    = m_sceneVpH.load(std::memory_order_relaxed);
+    if (fullW <= 0 || sw <= 0 || sh <= 0) return;
     // 设备像素 → item 逻辑像素（= 逻辑宽度 / 帧缓冲宽度）。
-    const float s = float(width()) / float(full.width);
-    x = float(scene.left)   * s;
-    y = float(scene.bottom) * s;   // GL 约定：原点在左下
-    w = float(scene.width)  * s;
-    h = float(scene.height) * s;
+    const float s = float(width()) / float(fullW);
+    x = float(m_sceneVpX.load(std::memory_order_relaxed)) * s;
+    y = float(m_sceneVpY.load(std::memory_order_relaxed)) * s;   // GL 约定：原点在左下
+    w = float(sw) * s;
+    h = float(sh) * s;
 }
 
 bool MujocoQuickItem::buildGizmoCameraLocked(QMatrix4x4& viewProj, QVector3D& camPos) const {
@@ -2159,16 +2182,16 @@ void MujocoQuickItem::onRenderOverlay(unsigned int targetFbo, int viewWidth, int
     //（simulate.cc::UiLayout 的 uistate.rect[3]）。叠加层必须按同一视口投影，
     // 否则 gizmo/点云会相对场景整体偏移一个侧栏宽度（辅助线在 user_scn 里由
     // mjr_render 画，所以不受影响 —— 这正是当初看起来"只有 gizmo 偏了"的原因）。
+    // 顺手刷新缓存，供 GUI 线程的 gizmo 命中/读数（buildGizmoCameraLocked）复用。
+    refreshSceneViewportCache();
     int sceneX = 0, sceneY = 0, sceneW = viewWidth, sceneH = viewHeight;
-    {
-        const mjuiState& st = m_sim->uistate;
-        if (st.nrect > 3) {
-            const mjrRect& r = st.rect[3];
-            if (r.width > 0 && r.height > 0) {
-                sceneX = r.left;   sceneY = r.bottom;
-                sceneW = r.width;  sceneH = r.height;
-            }
-        }
+    if (const int cw = m_sceneVpW.load(std::memory_order_relaxed),
+                 ch = m_sceneVpH.load(std::memory_order_relaxed);
+        cw > 0 && ch > 0) {
+        sceneX = m_sceneVpX.load(std::memory_order_relaxed);
+        sceneY = m_sceneVpY.load(std::memory_order_relaxed);
+        sceneW = cw;
+        sceneH = ch;
     }
     m_pointRenderer->beginFrame(
         targetFbo, viewWidth, viewHeight,
@@ -4419,6 +4442,7 @@ void MujocoQuickItem::onFrameRendered() {
     QVector<double> jointValues;
     if (m_sim) {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+        refreshSceneViewportCache();
         if (m_sim->m_ && m_sim->d_) {
             contacts = buildContactSnapshot(m_sim->m_, m_sim->d_);
             sampleTrackedTrajectoriesLocked(m_sim->m_, m_sim->d_);

@@ -1120,6 +1120,16 @@ private:
     // 附加轴 / 变位机 gizmo（单自由度关节，拖动直接改 qpos，不做逆解）。显示跟随 m_gizmo。
     AxisGizmo      m_axisGizmo;
 
+    // 3D 场景视口缓存（MuJoCo UI 侧栏 inset 后的 uistate.rect[3]），单位 = FBO 设备像素。
+    // 只在渲染线程写（refreshSceneViewportCache，uistate 的写入线程），GUI 线程只读
+    //（gizmo 命中/读数 → buildGizmoCameraLocked），从而避免跨线程直接读 m_sim->uistate。
+    // m_fullVpW <= 0 表示"尚未缓存" → 调用方回退为整幅。
+    std::atomic<int> m_fullVpW  {0};
+    std::atomic<int> m_sceneVpX {0};
+    std::atomic<int> m_sceneVpY {0};
+    std::atomic<int> m_sceneVpW {0};
+    std::atomic<int> m_sceneVpH {0};
+
     // TCP 坐标读数：渲染线程在 onFrameRendered 里只做锁内采样（世界坐标 + 屏幕位置），
     // 经 queued lambda 到 GUI 线程格式化成 m_gizmoPosText / m_gizmoPosScreen 并发信号
     // （QML 可绑定读；不读则完全由内置绘制子项消费）。m_gizmoPosText 为空 = 当前不显示。
@@ -1184,9 +1194,13 @@ private:
     // 必须在 m_sim->mtx 锁内调用：把 m_userScene 尾部的轨迹段全部重建
     //（末尾再让 m_gizmo.rebuildGeoms 追加 gizmo 段并写 ngeom）。
     void rebuildTrajectoryGeomsLocked();
+    // 渲染线程专用（uistate 只在该线程被写）：把 3D 场景视口 rect[3] 从 m_sim->uistate
+    // 刷新进下面的原子缓存，供 GUI 线程只读复用。
+    void refreshSceneViewportCache();
     // 在 m_sim->mtx 锁内调用：3D 场景在 FBO 里的实际视口（MuJoCo UI 左右侧栏会把
     // 场景挤到中间，见 simulate.cc::UiLayout 的 uistate.rect[3]），换算到 item 逻辑
-    // 像素、GL 约定（原点在左下）。拿不到时回退为整幅 (0, 0, width(), height())。
+    // 像素、GL 约定（原点在左下）。读的是渲染线程刷新的原子缓存；拿不到时回退为
+    // 整幅 (0, 0, width(), height())。
     void gizmoSceneViewportLocked(float& x, float& y, float& w, float& h) const;
     // 在 m_sim->mtx 锁内调用：由 scn 相机构造 view*proj 矩阵（视口取场景矩形，
     // 不是整幅 width()/height()），并输出世界相机位置。返回 false 表示相机/尺寸不可用。
