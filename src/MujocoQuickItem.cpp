@@ -132,7 +132,7 @@ static float easeInOutCubic(float t) {
 }
 
 // gizmo 的纯数学辅助 + 尺寸常量 + 状态/几何/命中/拖动，已剥离到 DragTeachGizmo。
-// 这里只保留编排：见本类的 gizmoHandle*/buildGizmoCameraLocked/sampleGizmoReadoutLocked。
+// 这里只保留编排：见本类的 gizmoHandle*/buildGizmoCameraLocked/sampleTrackedSiteLocked。
 
 // ===========================================================================
 // MujocoFboRenderer：Qt Quick scenegraph 渲染线程
@@ -208,168 +208,6 @@ private:
 };
 } // namespace
 
-// ---------------------------------------------------------------------------
-// 叠加文字子项（自绘，不依赖 QML）
-//
-// 两处用它：拖动示教 gizmo 的 TCP 坐标读数（跟随 TCP 投影点）与右上角的关节
-// 实时值面板（贴右上角、向左展开）。
-//
-// 单独做成 MujocoQuickItem 的子项，不去碰 QQuickFramebufferObject 自己的节点：
-// 子项有独立的 QSG 节点，天然画在父项内容之上。
-// 文字用 QPainter 画进 QImage（矢量字体、支持中文、按 devicePixelRatio 提清晰度），
-// 再当纹理贴到 scenegraph；文字/字号/颜色/DPR 都没变时只更新节点位置，不重画。
-// 文本里的 '\n' 会被拆成多行竖排（盒宽取最长行、盒高 = 行数 × 行高）。
-//
-// 线程：setReadout() 在 GUI 线程调（只改成员 + setPosition + update()）；
-// updatePaintNode() 在 scenegraph 同步阶段跑（此时 GUI 线程被阻塞），直接读成员安全。
-// ---------------------------------------------------------------------------
-class OverlayTextItem : public QQuickItem {
-public:
-    // 盒子相对锚点的摆放方式：
-    //   BoxRight —— 盒子在锚点右下方（锚点 = 盒子左上角），TCP 坐标读数用。
-    //   BoxLeft  —— 盒子在锚点左下方（锚点 = 盒子右上角），右上角面板用：只要
-    //               知道父项宽度就能定位，不必先在 GUI 线程量出文字宽度。
-    enum BoxSide { BoxRight, BoxLeft };
-
-    explicit OverlayTextItem(QQuickItem* parent) : QQuickItem(parent) {
-        setFlag(QQuickItem::ItemHasContents, true);
-        setAcceptedMouseButtons(Qt::NoButton);   // 不吃鼠标，别挡住 gizmo 拖动
-        setVisible(false);
-    }
-
-    // 在 GUI 线程调用：文本为空 = 不显示。
-    void setReadout(const QString& text, const QPointF& anchor, const QPoint& offset,
-                    int fontPx, const QColor& color, bool chip,
-                    BoxSide side = BoxRight) {
-        const QPointF pos = anchor + QPointF(offset);
-        const bool boxLeft = (side == BoxLeft);
-        if (m_text == text && m_fontPx == fontPx && m_color == color &&
-            m_chip == chip && m_boxLeft == boxLeft && position() == pos)
-            return;
-        m_text    = text;
-        m_fontPx  = qMax(6, fontPx);
-        m_color   = color;
-        m_chip    = chip;
-        m_boxLeft = boxLeft;
-        setPosition(pos);
-        update();
-    }
-
-protected:
-    QSGNode* updatePaintNode(QSGNode* node, UpdatePaintNodeData*) override {
-        auto* tn = static_cast<QSGSimpleTextureNode*>(node);
-        if (m_text.isEmpty()) {
-            if (tn) tn->setRect(QRectF());       // 收成 0 尺寸 = 不画
-            return tn;
-        }
-        const qreal dpr = window() ? window()->devicePixelRatio() : 1.0;
-        if (!tn || textureDirty(dpr)) {
-            const QImage img = renderImage(dpr);
-            if (!img.isNull() && window()) {
-                QSGTexture* tex = window()->createTextureFromImage(
-                    img, QQuickWindow::TextureHasAlphaChannel);
-                if (!tn) {
-                    tn = new QSGSimpleTextureNode();
-                    tn->setOwnsTexture(true);
-                    tn->setFiltering(QSGTexture::Linear);
-                }
-                tn->setTexture(tex);             // 接管所有权，旧纹理自动释放
-                m_drawnText   = m_text;
-                m_drawnFontPx = m_fontPx;
-                m_drawnColor  = m_color;
-                m_drawnChip   = m_chip;
-                m_drawnDpr    = dpr;
-                m_size = QSizeF(img.width() / dpr, img.height() / dpr);
-                setSize(m_size);                 // 让 item 的几何与画出来的盒子一致
-            }
-        }
-        if (tn) {
-            // BoxLeft（右上角面板）：盒子从锚点向左展开，所以 rect 的 x 取负。
-            // 此时 item 自身几何（[0,w]）与可见盒子不一致 — 无所谓，本子项
-            // 不接受鼠标、也不做裁剪，只影响 scenegraph 里画的这一块纹理。
-            tn->setRect(m_boxLeft
-                        ? QRectF(-m_size.width(), 0, m_size.width(), m_size.height())
-                        : QRectF(0, 0, m_size.width(), m_size.height()));
-        }
-        return tn;
-    }
-
-private:
-    bool textureDirty(qreal dpr) const {
-        return m_text != m_drawnText || m_fontPx != m_drawnFontPx ||
-               m_color != m_drawnColor || m_chip != m_drawnChip || dpr != m_drawnDpr;
-    }
-
-    QImage renderImage(qreal dpr) const {
-        // 等宽字体：数字变化时盒子宽度不会跳。
-        QFont f = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-        f.setPixelSize(m_fontPx);
-        f.setStyleStrategy(QFont::PreferAntialias);
-        const QFontMetricsF fm(f);
-        const qreal padX = m_chip ? 7.0 : 1.0;
-        const qreal padY = m_chip ? 4.0 : 1.0;
-        // QPainter::drawText(QPointF, QString) 不认 '\n' —— 换行符既不换行也不
-        // 报错，整串会被当单行画掉。所以这里自己按行拆开，逐行画。
-        const QStringList lines = m_text.split(QLatin1Char('\n'));
-        const qreal lineH = fm.height();
-        qreal tw = 0.0;
-        for (const QString& ln : lines) tw = qMax(tw, fm.horizontalAdvance(ln));
-        const qreal th = lineH * qMax(1, lines.size());
-        const QSizeF sz(tw + 2 * padX, th + 2 * padY);
-        QImage img(QSize(qCeil(sz.width() * dpr), qCeil(sz.height() * dpr)),
-                   QImage::Format_ARGB32_Premultiplied);
-        if (img.isNull()) return img;
-        img.setDevicePixelRatio(dpr);
-        img.fill(Qt::transparent);
-        QPainter p(&img);
-        p.setRenderHint(QPainter::Antialiasing);
-        p.setRenderHint(QPainter::TextAntialiasing);
-        p.setFont(f);
-        // 逐行基线：第 i 行 = 上边距 + i×行高 + ascent（单行时与原来的垂直居中结果相同）。
-        // off 是描边用的偏移量。
-        auto drawLines = [&](const QPointF& off) {
-            for (int i = 0; i < lines.size(); ++i) {
-                p.drawText(QPointF(padX + off.x(),
-                                   padY + i * lineH + fm.ascent() + off.y()),
-                           lines.at(i));
-            }
-        };
-        if (m_chip) {
-            // 可选：深色半透明圆角底衬
-            p.setPen(Qt::NoPen);
-            p.setBrush(QColor(16, 20, 24, 208));
-            p.drawRoundedRect(QRectF(0, 0, sz.width(), sz.height()), 4.0, 4.0);
-        } else {
-            // 默认：不画底衬，只给字加 1px 深色描边 —— 跟线框 gizmo 风格一致，
-            // 又不会在亮背景上糊掉。
-            p.setPen(QColor(0, 0, 0, 190));
-            for (int dx = -1; dx <= 1; ++dx) {
-                for (int dy = -1; dy <= 1; ++dy) {
-                    if (dx || dy) drawLines(QPointF(dx, dy));
-                }
-            }
-        }
-        p.setPen(m_color);
-        drawLines(QPointF(0.0, 0.0));
-        return img;
-    }
-
-    QString m_text;
-    // 下面几个初值只是占位：构造后第一次 updateReadoutItem() 就会被
-    // MujocoQuickItem 的 m_readout* 成员覆盖（那里才是真正的默认值）。
-    int     m_fontPx = 26;
-    QColor  m_color  {0xff, 0xff, 0xff};
-    bool    m_chip   = false;
-    bool    m_boxLeft = false;   // 盒子是否向锚点左侧展开（见 setReadout 的 BoxSide）
-    // 上一次实际生成纹理用的参数（在渲染线程读写）
-    QString m_drawnText;
-    int     m_drawnFontPx = 0;
-    QColor  m_drawnColor;
-    bool    m_drawnChip = false;
-    qreal   m_drawnDpr = 0.0;
-    QSizeF  m_size;
-};
-
 // ===========================================================================
 // MujocoQuickItem
 // ===========================================================================
@@ -385,15 +223,6 @@ MujocoQuickItem::MujocoQuickItem(QQuickItem* parent)
     setAcceptHoverEvents(true);
     setFlag(ItemHasContents, true);
     setActiveFocusOnTab(true);
-    // 两个自绘叠加子项（自绘，不依赖 QML）：TCP 坐标读数 + 右上角关节实时值面板。
-    m_readoutItem = new OverlayTextItem(this);
-    m_jointsItem  = new OverlayTextItem(this);
-    // 右上角面板的位置由父项宽度算出来，尺寸变了得重新贴一次。
-    connect(this, &QQuickItem::widthChanged,  this, [this] { updateJointsReadoutItem(); });
-    connect(this, &QQuickItem::heightChanged, this, [this] { updateJointsReadoutItem(); });
-    // 关节面板的显示跟随 gizmo 的可见性，所以 gizmo 一显一隐都得重贴。
-    connect(this, &MujocoQuickItem::gizmoVisibleChanged, this,
-            [this] { updateJointsReadoutItem(); });
 }
 
 MujocoQuickItem::~MujocoQuickItem() {
@@ -1453,94 +1282,22 @@ bool MujocoQuickItem::buildGizmoCameraLocked(QMatrix4x4& viewProj, QVector3D& ca
     return true;
 }
 
-bool MujocoQuickItem::sampleGizmoReadoutLocked(QVector3D& worldPos, QPointF& screenPos) const {
-    if (!m_sim || !m_gizmo.visible() || !m_gizmo.poseValid()) return false;
-    QMatrix4x4 vp;
-    QVector3D camPos;
-    if (!buildGizmoCameraLocked(vp, camPos)) return false;
-    bool ok = false;
-    const QPointF p = DragTeachGizmo::worldToScreen(
-        vp, m_gizmo.pos(), float(width()), float(height()), &ok);
-    if (!ok) return false;                 // 落在相机背后
-    worldPos  = m_gizmo.pos();
-    screenPos = p;
+bool MujocoQuickItem::sampleTrackedSiteLocked(QVector3D& worldPos) const {
+    if (!m_sim || !m_sim->m_ || !m_sim->d_) return false;
+    // 跟踪 site（默认 "tcp"）的当前世界位置。直接读 mjData，不依赖 gizmo 可见性，
+    // 所以仿真运行中（gizmo 自动隐藏）外部照样能拿到实时 TCP 位置。
+    const QByteArray nm = m_gizmo.trackedSite().toUtf8();
+    const int sid = mj_name2id(m_sim->m_, mjOBJ_SITE, nm.constData());
+    if (sid < 0 || sid >= m_sim->m_->nsite) return false;
+    const mjtNum* xp = m_sim->d_->site_xpos + 3 * sid;
+    worldPos = QVector3D(float(xp[0]), float(xp[1]), float(xp[2]));
     return true;
 }
 
-QString MujocoQuickItem::formatGizmoPosText(const QVector3D& pos) const {
-    if (m_readoutMillimeters) {
-        // 毫米，1 位小数（分辨率 0.1 mm）
-        return QStringLiteral("X %1\nY %2\nZ %3 mm")
-            .arg(double(pos.x()) * 1000.0, 0, 'f', 1)
-            .arg(double(pos.y()) * 1000.0, 0, 'f', 1)
-            .arg(double(pos.z()) * 1000.0, 0, 'f', 1);
-    }
-    // 米，3 位小数（分辨率 1 mm）。三行竖排；等宽字体下用 fieldWidth=7 右对齐，
-    // 让小数点对齐（正负号、位数不同也不会歪）。
-    return QStringLiteral("X %1\nY %2\nZ %3 m")
-        .arg(double(pos.x()), 7, 'f', 3)
-        .arg(double(pos.y()), 7, 'f', 3)
-        .arg(double(pos.z()), 7, 'f', 3);
-}
-
-void MujocoQuickItem::setGizmoReadoutMillimeters(bool mm) {
-    if (m_readoutMillimeters == mm) return;
-    m_readoutMillimeters = mm;
-    // 立即用上一次采样到的位置重排一次，不用等下一帧
-    const QString t = m_gizmoPosValid ? formatGizmoPosText(m_gizmoPosWorld) : QString();
-    if (m_gizmoPosText != t) {
-        m_gizmoPosText = t;
-        emit gizmoPosTextChanged();
-    }
-    updateJointsReadoutItem();
-    emit gizmoReadoutMillimetersChanged();
-}
-
-void MujocoQuickItem::updateReadoutItem() {
-    // TCP 坐标已并入右上角面板（updateJointsReadoutItem），悬浮读数不再单独显示。
-    if (m_readoutItem) m_readoutItem->setVisible(false);
-}
-
-void MujocoQuickItem::setGizmoReadoutEnabled(bool on) {
-    if (m_readoutEnabled == on) return;
-    m_readoutEnabled = on;
-    updateOverlayItems();
-    emit gizmoReadoutEnabledChanged();
-}
-
-void MujocoQuickItem::setGizmoReadoutFontPx(int px) {
-    const int v = std::clamp(px, 6, 96);
-    if (m_readoutFontPx == v) return;
-    m_readoutFontPx = v;
-    updateOverlayItems();
-    emit gizmoReadoutFontPxChanged();
-}
-
-void MujocoQuickItem::setGizmoReadoutColor(const QColor& c) {
-    if (!c.isValid() || m_readoutColor == c) return;
-    m_readoutColor = c;
-    updateOverlayItems();
-    emit gizmoReadoutColorChanged();
-}
-
-void MujocoQuickItem::setGizmoReadoutOffset(const QPoint& o) {
-    if (m_readoutOffset == o) return;
-    m_readoutOffset = o;
-    updateReadoutItem();
-    emit gizmoReadoutOffsetChanged();
-}
-
-void MujocoQuickItem::setGizmoReadoutChip(bool on) {
-    if (m_readoutChip == on) return;
-    m_readoutChip = on;
-    updateOverlayItems();
-    emit gizmoReadoutChipChanged();
-}
-
 // ===========================================================================
-// 关节实时值面板（右上角）
+// 实时关节值采样
 // ===========================================================================
-bool MujocoQuickItem::sampleJointsReadoutLocked(QStringList& names,
+bool MujocoQuickItem::sampleJointValuesLocked(QStringList& names,
                                                 QVector<int>& types,
                                                 QVector<double>& values) const {
     names.clear();
@@ -1563,84 +1320,44 @@ bool MujocoQuickItem::sampleJointsReadoutLocked(QStringList& names,
     return true;
 }
 
-QString MujocoQuickItem::formatJointsText(const QStringList& names,
-                                          const QVector<int>& types,
-                                          const QVector<double>& values) const {
-    if (names.isEmpty() || names.size() != values.size()) return QString();
+void MujocoQuickItem::setJointValuesDegrees(bool deg) {
+    if (m_jointValuesDegrees == deg) return;
+    m_jointValuesDegrees = deg;
+    // 值的单位变了 —— 通知绑定方（jointValues / jointValueByName 的返回值都跟着变）。
+    emit jointValuesChanged();
+    emit jointValuesDegreesChanged();
+}
 
-    // 名字列对齐：等宽字体下按最长名字补空格（数值列右对齐）。
-    int nameW = 0;
-    for (const QString& n : names) nameW = qMax(nameW, n.size());
+// 把内部缓存的原始值换算成对外暴露的值：hinge 按单位开关换算（度/弧度），
+// slide 恒为米。
+static double exposedJointValue(int type, double raw, bool degrees) {
+    if (type == mjJNT_SLIDE || !degrees) return raw;
+    return qRadiansToDegrees(raw);
+}
 
-    // 度符号（U+00B0）：本翻译单元没开 /utf-8，MSVC 按 CP936 读源码，字面量里
-    // 直接写非 ASCII 会变成乱码字节，所以按码点构造。
-    static const QString degSign = QString(QChar(0x00B0));
+QStringList MujocoQuickItem::jointNames() const {
+    // GUI 线程缓存（渲染线程每帧采样 → queued 到 GUI 线程），直接读，无需加锁。
+    return m_jointNames;
+}
 
-    QString out;
-    for (int i = 0; i < names.size(); ++i) {
-        const double v = values.at(i);
-        QString val;
-        if (types.at(i) == mjJNT_SLIDE) {
-            val = QStringLiteral("%1 m").arg(v, 7, 'f', 4);        // 滑动关节：米
-        } else if (m_jointsDegrees) {
-            val = QStringLiteral("%1").arg(qRadiansToDegrees(v), 7, 'f', 1) + degSign;
-        } else {
-            val = QStringLiteral("%1 rad").arg(v, 7, 'f', 4);      // 弧度
-        }
-        if (!out.isEmpty()) out += QLatin1Char('\n');
-        out += names.at(i).leftJustified(nameW, QLatin1Char(' ')) + QLatin1Char(' ') + val;
+QVariantList MujocoQuickItem::jointValues() const {
+    QVariantList out;
+    out.reserve(m_jointValues.size());
+    for (int i = 0; i < m_jointValues.size(); ++i) {
+        const int type = (i < m_jointTypes.size()) ? m_jointTypes.at(i) : mjJNT_HINGE;
+        out.append(exposedJointValue(type, m_jointValues.at(i), m_jointValuesDegrees));
     }
     return out;
 }
 
-void MujocoQuickItem::updateJointsReadoutItem() {
-    if (!m_jointsItem) return;
-    auto* item = static_cast<OverlayTextItem*>(m_jointsItem);
-    // 右上角面板 = TCP 坐标块 + 关节值，一起显示。
-    QString panel = m_gizmoPosText;
-    if (!m_jointsText.isEmpty()) {
-        if (!panel.isEmpty()) panel += QStringLiteral("\n\n");
-        panel += m_jointsText;
+double MujocoQuickItem::jointValueByName(const QString& name) const {
+    for (int i = 0; i < m_jointNames.size(); ++i) {
+        if (m_jointNames.at(i) != name) continue;
+        if (i >= m_jointValues.size()) break;
+        const int type = (i < m_jointTypes.size()) ? m_jointTypes.at(i) : mjJNT_HINGE;
+        return exposedJointValue(type, m_jointValues.at(i), m_jointValuesDegrees);
     }
-    // 显示与否跟 gizmo 读数一致：读数总开关关掉、或 gizmo 当前不可见（例如仿真在跑）
-    // 时一起藏起来。样式（字号/颜色/底衬）也直接复用 gizmo 读数那一套，不另设开关。
-    // m_gizmo.visible 这里不加锁读 —— 与公开 getter gizmoVisible() 同口径，可见性
-    // 每次变化都会发 gizmoVisibleChanged，构造里已接上重贴面板。
-    const bool show = m_readoutEnabled && m_gizmo.visible() && !panel.isEmpty();
-    item->setVisible(show);
-    if (!show) return;
-    // 右上角：盒子的右上角贴在 (width - margin.x, margin.y)，盒子向左展开。
-    item->setReadout(panel,
-                     QPointF(width() - m_jointsMargin.x(), m_jointsMargin.y()),
-                     QPoint(0, 0), m_readoutFontPx, m_readoutColor, m_readoutChip,
-                     OverlayTextItem::BoxLeft);
-}
-
-void MujocoQuickItem::updateOverlayItems() {
-    // 两个叠加面板共用的开关（总开关 / 字号 / 颜色 / 底衬）变了 —— 一次刷新两处。
-    updateReadoutItem();
-    updateJointsReadoutItem();
-}
-
-void MujocoQuickItem::setJointsReadoutDegrees(bool deg) {
-    if (m_jointsDegrees == deg) return;
-    m_jointsDegrees = deg;
-    // 立即用缓存的上一次采样值重排一次，不用等下一帧
-    const QString t = formatJointsText(m_jointNames, m_jointTypes, m_jointValues);
-    if (m_jointsText != t) {
-        m_jointsText = t;
-        emit jointsReadoutTextChanged();
-    }
-    updateJointsReadoutItem();
-    emit jointsReadoutDegreesChanged();
-}
-
-void MujocoQuickItem::setJointsReadoutMargin(const QPoint& m) {
-    const QPoint v(qMax(0, m.x()), qMax(0, m.y()));
-    if (m_jointsMargin == v) return;
-    m_jointsMargin = v;
-    updateJointsReadoutItem();
-    emit jointsReadoutMarginChanged();
+    return qQNaN();
 }
 
 // --------------------------------------------------------------- 公共 API ----
@@ -1776,6 +1493,37 @@ void MujocoQuickItem::reportGizmoEditSolvable(bool solvable) {
     if (!m_sim) return;
     std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
     m_gizmo.reportSolvable(solvable);
+}
+
+bool MujocoQuickItem::setTcpPosition(const QVector3D& position) {
+    if (!m_sim) return false;
+    QQuaternion ori;
+    bool haveOri = false;
+    {
+        std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+        // 姿态沿用 tracked site 的当前世界姿态：直接采 site_xmat，不依赖 gizmo
+        // 可见性/位姿缓存，避免仿真运行中拿到陈旧值。本接口只设位置，姿态不变。
+        if (m_sim->m_ && m_sim->d_) {
+            const QByteArray nm = m_gizmo.trackedSite().toUtf8();
+            const int sid = mj_name2id(m_sim->m_, mjOBJ_SITE, nm.constData());
+            if (sid >= 0 && sid < m_sim->m_->nsite) {
+                const mjtNum* xm = m_sim->d_->site_xmat + 9 * sid;
+                float rot[9];
+                for (int i = 0; i < 9; ++i) rot[i] = float(xm[i]);   // site_xmat 行主序
+                ori = QQuaternion::fromRotationMatrix(QMatrix3x3(rot));
+                haveOri = true;
+            }
+        }
+        if (!haveOri && m_gizmo.poseValid()) {
+            ori = m_gizmo.ori();
+            haveOri = true;
+        }
+    }
+    if (!haveOri) return false;
+    // 与拖动 gizmo 完全同一条路：把目标世界位姿送出去，由上层 IK 反解并写关节。
+    emit gizmoPoseEdited(position, ori);
+    requestRenderUpdate();
+    return true;
 }
 
 // -------------------------------------------------------------- 交互处理 ----
@@ -3358,6 +3106,16 @@ JointInfo MujocoQuickItem::jointInfo(int index) const
     return result;
 }
 
+int MujocoQuickItem::jointIndexByName(const QString& name) const
+{
+    int idx = -1;
+    withSimulation([&](const mjModel* m, mjData*) {
+        const int id = mj_name2id(m, mjOBJ_JOINT, name.toUtf8().constData());
+        idx = (id >= 0 && id < static_cast<int>(m->njnt)) ? id : -1;
+    });
+    return idx;
+}
+
 QVariantList MujocoQuickItem::jointPosition(int index) const
 {
     QVariantList result;
@@ -4434,7 +4192,6 @@ void MujocoQuickItem::onFrameRendered() {
     int  histCap   = m_historyCapacity;
     // TCP 坐标读数（锁内采样世界坐标 + 屏幕位置，随后在 GUI 线程格式化/发信号）
     QVector3D tcpWorld;
-    QPointF   tcpPos;
     bool      tcpValid = false;
     // 关节实时值（同样只做锁内采样，格式化留给 GUI 线程 → 单位切换能立刻生效）
     QStringList     jointNames;
@@ -4468,10 +4225,10 @@ void MujocoQuickItem::onFrameRendered() {
             }
             if (gizmoDirty) rebuildTrajectoryGeomsLocked();
         }
-        // TCP 坐标读数：投影到 item 逻辑像素坐标（由内置绘制子项用矢量字体画）
-        tcpValid = sampleGizmoReadoutLocked(tcpWorld, tcpPos);
-        // 关节实时值面板：采样各 hinge/slide 关节的 qpos
-        sampleJointsReadoutLocked(jointNames, jointTypes, jointValues);
+        // TCP 世界位置（tcpPosition 属性）：直接采跟踪 site，与 gizmo 可见性无关。
+        tcpValid = sampleTrackedSiteLocked(tcpWorld);
+        // 实时关节值：采样各 hinge/slide 关节的 qpos
+        sampleJointValuesLocked(jointNames, jointTypes, jointValues);
         if (m_sim->m_) {
             histScrub = m_sim->scrub_index;
             histCap   = m_sim->nhistory_ > 0 ? m_sim->nhistory_ - 1 : 0;
@@ -4515,7 +4272,7 @@ void MujocoQuickItem::onFrameRendered() {
         applyCameraTransitionLocked(*m_sim);
     }
 
-    QMetaObject::invokeMethod(this, [this, statusText, contacts = std::move(contacts), simRunChanged, gizmoHidden, histScrub, histCap, tcpWorld, tcpPos, tcpValid,
+    QMetaObject::invokeMethod(this, [this, statusText, contacts = std::move(contacts), simRunChanged, gizmoHidden, histScrub, histCap, tcpWorld, tcpValid,
                                      jointNames = std::move(jointNames),
                                      jointTypes = std::move(jointTypes),
                                      jointValues = std::move(jointValues)] {
@@ -4533,37 +4290,20 @@ void MujocoQuickItem::onFrameRendered() {
             m_contactSnapshot = std::move(contacts);
             emit contactsChanged();
         }
-        // TCP 坐标读数（在本线程格式化，单位切换/样式改动都能立刻生效）
-        m_gizmoPosValid = tcpValid;
-        if (tcpValid) m_gizmoPosWorld = tcpWorld;
-        const QString tcpText = tcpValid ? formatGizmoPosText(tcpWorld) : QString();
-        bool panelDirty = false;
-        if (m_gizmoPosText != tcpText) {
-            m_gizmoPosText = tcpText;
-            emit gizmoPosTextChanged();
-            panelDirty = true;
+        // TCP 世界位置（tcpPosition 属性）：值真的变了才发。
+        if (tcpValid && m_gizmoPosWorld != tcpWorld) {
+            m_gizmoPosWorld = tcpWorld;
+            emit tcpPositionChanged();
         }
-        if (m_gizmoPosScreen != tcpPos) {
-            m_gizmoPosScreen = tcpPos;
-            emit gizmoPosScreenChanged();
-        }
-        // 关节实时值：名字与值都没变就不动 —— 否则每帧重排+重建纹理，
-        // 机械臂静止时白掉帧。
+        // 实时关节值：名字与值都没变就不发 —— 静止时不刷 UI。
         if (!sameStringList(jointNames, m_jointNames) ||
             !sameDoubleList(jointValues, m_jointValues)) {
             m_jointNames  = std::move(jointNames);
             m_jointTypes  = std::move(jointTypes);
             m_jointValues = std::move(jointValues);
-            const QString jt = formatJointsText(m_jointNames, m_jointTypes, m_jointValues);
-            if (m_jointsText != jt) {
-                m_jointsText = jt;
-                emit jointsReadoutTextChanged();
-            }
-            panelDirty = true;
+            // 结构化实时值变了（jointNames/jointValues 属性 + jointValueByName）。
+            emit jointValuesChanged();
         }
-        // 右上角面板（TCP + 关节）：TCP 或关节变了都刷一次。
-        if (panelDirty) updateJointsReadoutItem();
-        updateReadoutItem();
         update();
     }, Qt::QueuedConnection);
 }
