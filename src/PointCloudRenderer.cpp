@@ -303,6 +303,32 @@ out vec4 fragColor;
 void main() { fragColor = vColor; }
 )GLSL";
 
+// 碰撞点标记：固定像素大小的圆形标记（带描边）。顶点只传位置，颜色走 uniform。
+const char* kMarkerVertexShader = R"GLSL(
+#version 330
+layout(location = 0) in vec3 aPos;
+uniform mat4  uMVP;
+uniform float uSizePx;      // 直径（像素），固定、不随距离缩放
+void main() {
+    gl_Position  = uMVP * vec4(aPos, 1.0);
+    gl_PointSize = uSizePx;
+}
+)GLSL";
+
+const char* kMarkerFragmentShader = R"GLSL(
+#version 330
+uniform vec4  uFill;        // 填充色
+uniform vec4  uOutline;     // 描边色
+out vec4 fragColor;
+void main() {
+    vec2 d = gl_PointCoord - vec2(0.5);
+    float r = length(d) * 2.0;          // 0..1（1=圆边）
+    if (r > 1.0) discard;               // 圆外丢弃
+    // 外环 25% 画描边，内部画填充 → 深色描边 + 亮心，弱底色上也醒目。
+    fragColor = (r > 0.75) ? uOutline : uFill;
+}
+)GLSL";
+
 } // namespace
 
 PointCloudRenderer::PointCloudRenderer() = default;
@@ -407,6 +433,70 @@ void PointCloudRenderer::drawLines(const float* xyz, const float* rgba, int vert
     // 复位到 beginFrame 的默认（reverse-Z 深度测试），免得影响后续帧/绘制。
     gl->glEnable(GL_DEPTH_TEST);
     gl->glDepthMask(GL_TRUE);
+    gl->glBindVertexArray(0);
+    gl->glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+
+bool PointCloudRenderer::ensureMarkerProgram() {
+    if (m_markerProg) return true;
+    auto* prog = new QOpenGLShaderProgram();
+    if (!prog->addShaderFromSourceCode(QOpenGLShader::Vertex, kMarkerVertexShader) ||
+        !prog->addShaderFromSourceCode(QOpenGLShader::Fragment, kMarkerFragmentShader) ||
+        !prog->link()) {
+        delete prog;
+        return false;
+    }
+    m_markerProg = prog;
+    m_locMarkerMVP     = prog->uniformLocation("uMVP");
+    m_locMarkerSize    = prog->uniformLocation("uSizePx");
+    m_locMarkerFill    = prog->uniformLocation("uFill");
+    m_locMarkerOutline = prog->uniformLocation("uOutline");
+    auto* gl = QOpenGLContext::currentContext()->extraFunctions();
+    gl->glGenVertexArrays(1, &m_markerVao);
+    gl->glGenBuffers(1, &m_markerPosVbo);
+    return true;
+}
+
+void PointCloudRenderer::drawMarkers(const float* xyz, int count, float sizePx,
+                                     const QVector4D& fill, const QVector4D& outline,
+                                     bool depthTest) {
+    if (count <= 0 || !xyz) return;
+    if (!ensureMarkerProgram()) return;
+    auto* gl = QOpenGLContext::currentContext()->extraFunctions();
+
+    gl->glBindVertexArray(m_markerVao);
+    gl->glBindBuffer(GL_ARRAY_BUFFER, m_markerPosVbo);
+    gl->glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<qopengl_GLsizeiptr>(sizeof(float) * 3 * count),
+                     xyz, GL_DYNAMIC_DRAW);
+    gl->glEnableVertexAttribArray(0);
+    gl->glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+
+    if (depthTest) {
+        gl->glEnable(GL_DEPTH_TEST);
+        gl->glDepthMask(GL_TRUE);
+    } else {
+        // 关深度测试 + 不写深度 → 永远盖在最前（overlay），不干扰后续绘制深度。
+        gl->glDisable(GL_DEPTH_TEST);
+        gl->glDepthMask(GL_FALSE);
+    }
+    // 固定像素大小 + 圆形点精灵（兼容 profile 下须启用点精灵，否则 gl_PointCoord 恒 0）。
+    gl->glEnable(GL_PROGRAM_POINT_SIZE);
+    gl->glEnable(GL_POINT_SPRITE);
+
+    m_markerProg->bind();
+    m_markerProg->setUniformValue(m_locMarkerMVP, m_proj * m_view);
+    m_markerProg->setUniformValue(m_locMarkerSize, sizePx > 0.0f ? sizePx : 1.0f);
+    m_markerProg->setUniformValue(m_locMarkerFill, fill);
+    m_markerProg->setUniformValue(m_locMarkerOutline, outline);
+    gl->glDrawArrays(GL_POINTS, 0, count);
+    m_markerProg->release();
+
+    // 复位到 beginFrame 的默认（reverse-Z 深度测试），免得影响后续帧/绘制。
+    gl->glEnable(GL_DEPTH_TEST);
+    gl->glDepthMask(GL_TRUE);
+    gl->glDisable(GL_POINT_SPRITE);
     gl->glBindVertexArray(0);
     gl->glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
@@ -941,6 +1031,8 @@ void PointCloudRenderer::releaseGL() {
         if (m_lineVao)         { gl->glDeleteVertexArrays(1, &m_lineVao); m_lineVao = 0; }
         if (m_linePosVbo)      { gl->glDeleteBuffers(1, &m_linePosVbo); m_linePosVbo = 0; }
         if (m_lineColVbo)      { gl->glDeleteBuffers(1, &m_lineColVbo); m_lineColVbo = 0; }
+        if (m_markerVao)       { gl->glDeleteVertexArrays(1, &m_markerVao); m_markerVao = 0; }
+        if (m_markerPosVbo)    { gl->glDeleteBuffers(1, &m_markerPosVbo); m_markerPosVbo = 0; }
     }
     m_clouds.clear();
     m_reflW = m_reflH = m_reflSamples = 0;
@@ -952,4 +1044,6 @@ void PointCloudRenderer::releaseGL() {
     m_resolveProg = nullptr;
     delete m_lineProg;
     m_lineProg = nullptr;
+    delete m_markerProg;
+    m_markerProg = nullptr;
 }

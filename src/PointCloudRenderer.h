@@ -105,6 +105,14 @@ public:
     void drawLines(const float* xyz, const float* rgba, int vertexCount,
                    float widthPx, bool depthTest);
 
+    // 绘制一批固定像素大小的圆形标记点（碰撞点标记用）。xyz 按点扁平（世界坐标），
+    // count 为点数。sizePx = 直径像素（不随相机推拉缩放）；fill/outline 为填充/描边
+    // 颜色；depthTest=false 时关深度测试/写入 → 永远盖在最前（overlay）。自带动态
+    // VBO，不进点云注册表。须在 beginFrame 与 endFrame 之间调用。
+    void drawMarkers(const float* xyz, int count, float sizePx,
+                     const QVector4D& fill, const QVector4D& outline,
+                     bool depthTest);
+
     // 结束一帧：恢复必要的 GL 状态（解绑 program / VAO）。
     void endFrame();
 
@@ -128,6 +136,8 @@ private:
     GpuCloud& ensureCloud(int cloudId);
     // 惰性创建线段渲染的 shader / VAO / VBO（首次 drawLines 时）。
     bool ensureLineProgram();
+    // 惰性创建圆形标记渲染的 shader / VAO / VBO（首次 drawMarkers 时）。
+    bool ensureMarkerProgram();
 
     // 反射遮挡：把 MuJoCo 场景深度按平面镜像散射成"倒影遮挡深度"纹理，
     // 供 drawCloudReflected 在片元里做深度比较，实现点云倒影被物体倒影遮挡。
@@ -163,6 +173,15 @@ private:
     unsigned int          m_linePosVbo = 0;
     unsigned int          m_lineColVbo = 0;
     int                   m_locLineMVP = -1;
+
+    // 圆形标记渲染（碰撞点叠加层）：独立 program + 动态 VBO（仅位置）。
+    QOpenGLShaderProgram* m_markerProg      = nullptr;
+    unsigned int          m_markerVao       = 0;
+    unsigned int          m_markerPosVbo    = 0;
+    int                   m_locMarkerMVP    = -1;
+    int                   m_locMarkerSize   = -1;
+    int                   m_locMarkerFill   = -1;
+    int                   m_locMarkerOutline= -1;
 
     unsigned int m_dummyVao = 0;         // scatter / 全屏解析用的空 VAO
 

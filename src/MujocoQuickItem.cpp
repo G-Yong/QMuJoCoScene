@@ -43,6 +43,7 @@
 #include <cstring>
 #include <iterator>
 #include <limits>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -1871,6 +1872,122 @@ QVariantList MujocoQuickItem::pointCloudPoints(int cloudId) const {
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// 碰撞点标记（固定像素圆点 overlay，闪烁）
+// ---------------------------------------------------------------------------
+
+void MujocoQuickItem::setContactMarkersEnabled(bool enabled) {
+    if (m_contactMarkersEnabled.exchange(enabled) == enabled) return;
+    if (!enabled) {
+        // 关闭时立即清空当前标记，避免残留最后一帧的点。
+        std::lock_guard<std::mutex> lk(m_contactMarkerMtx);
+        m_contactMarkerPts.clear();
+    }
+}
+
+bool MujocoQuickItem::contactMarkersEnabled() const {
+    return m_contactMarkersEnabled.load();
+}
+
+void MujocoQuickItem::setContactMarkerMode(ContactMarkerMode mode) {
+    m_contactMarkerMode.store(static_cast<int>(mode));
+}
+
+MujocoQuickItem::ContactMarkerMode MujocoQuickItem::contactMarkerMode() const {
+    return static_cast<ContactMarkerMode>(m_contactMarkerMode.load());
+}
+
+void MujocoQuickItem::setContactMarkerSize(float pixelDiameter) {
+    std::lock_guard<std::mutex> lk(m_contactMarkerMtx);
+    m_contactMarkerSizePx = pixelDiameter > 0.0f ? pixelDiameter : 1.0f;
+}
+
+void MujocoQuickItem::setContactMarkerColors(const QVector4D& fill, const QVector4D& outline) {
+    std::lock_guard<std::mutex> lk(m_contactMarkerMtx);
+    m_contactMarkerFill = fill;
+    m_contactMarkerOutline = outline;
+}
+
+void MujocoQuickItem::setContactMarkerBlink(float hz) {
+    // 以 mHz 存进原子量，渲染线程读。hz<=0 => 0 => 常亮。
+    m_contactMarkerBlinkMilliHz.store(hz > 0.0f ? static_cast<int>(hz * 1000.0f) : 0);
+}
+
+int MujocoQuickItem::contactMarkerCount() const {
+    std::lock_guard<std::mutex> lk(m_contactMarkerMtx);
+    return static_cast<int>(m_contactMarkerPts.size() / 3);
+}
+
+// 物理线程（持 sim.mtx）：按当前 d->contact 刷新标记点集。
+// 两种模式（m_contactMarkerMode）：单点 = 每对碰撞 body 取穿透最深处一个点；
+// 多点 = 画出所有穿透接触点。两者口径一致：仅计穿透接触（dist<0）、被求解器
+// 激活（exclude==0 且 efc_address>=0）、跳过 world body(id 0)。coal 注入的
+// 接触也在同一张表里，自然一并计入。采样上限防止异常接触爆量。
+void MujocoQuickItem::sampleContactMarkersLocked(const mjModel* m, const mjData* d) {
+    if (!m_contactMarkersEnabled.load()) {
+        if (!m_contactMarkerPts.empty()) {
+            std::lock_guard<std::mutex> lk(m_contactMarkerMtx);
+            m_contactMarkerPts.clear();
+        }
+        return;
+    }
+    if (!m || !d) return;
+
+    const bool allPoints = (m_contactMarkerMode.load() == ContactMarkerAllPoints);
+
+    // 单点模式：(bodyA,bodyB) 归一化为 key → 该对目前最深接触的 (dist, pos)。
+    struct Deepest { double dist; float pos[3]; };
+    std::unordered_map<long long, Deepest> best;
+    std::vector<float> pts;
+    if (allPoints)
+        pts.reserve(static_cast<size_t>(d->ncon) * 3);
+    else
+        best.reserve(static_cast<size_t>(d->ncon));
+
+    for (int i = 0; i < d->ncon; ++i) {
+        const mjContact& c = d->contact[i];
+        if (c.exclude != 0 || c.efc_address < 0) continue;  // 未激活
+        if (c.dist >= 0) continue;                           // 非穿透
+        const int b0 = (c.geom[0] >= 0) ? m->geom_bodyid[c.geom[0]] : -1;
+        const int b1 = (c.geom[1] >= 0) ? m->geom_bodyid[c.geom[1]] : -1;
+        if (b0 <= 0 && b1 <= 0) continue;                    // 两边都是 world/无效
+
+        if (allPoints) {
+            if (static_cast<int>(pts.size() / 3) >= kMaxContactMarkers) break;
+            pts.push_back(static_cast<float>(c.pos[0]));
+            pts.push_back(static_cast<float>(c.pos[1]));
+            pts.push_back(static_cast<float>(c.pos[2]));
+            continue;
+        }
+
+        const int lo = std::min(b0, b1);
+        const int hi = std::max(b0, b1);
+        const long long key = (static_cast<long long>(lo) << 32) ^ static_cast<unsigned>(hi);
+        auto it = best.find(key);
+        if (it == best.end() || c.dist < it->second.dist) {
+            Deepest dd;
+            dd.dist = c.dist;
+            dd.pos[0] = static_cast<float>(c.pos[0]);
+            dd.pos[1] = static_cast<float>(c.pos[1]);
+            dd.pos[2] = static_cast<float>(c.pos[2]);
+            best[key] = dd;
+        }
+    }
+
+    if (!allPoints) {
+        pts.reserve(best.size() * 3);
+        for (const auto& kv : best) {
+            if (static_cast<int>(pts.size() / 3) >= kMaxContactMarkers) break;
+            pts.push_back(kv.second.pos[0]);
+            pts.push_back(kv.second.pos[1]);
+            pts.push_back(kv.second.pos[2]);
+        }
+    }
+
+    std::lock_guard<std::mutex> lk(m_contactMarkerMtx);
+    m_contactMarkerPts.swap(pts);
+}
+
 // 渲染线程：把点云用 GL_POINTS 画进 MuJoCo 离屏 FBO（共享深度，正确互遮挡），
 // 并把 always-on-top 的 gizmo 线框用关掉深度的叠加层画在最前。
 void MujocoQuickItem::onRenderOverlay(unsigned int targetFbo, int viewWidth, int viewHeight) {
@@ -1919,7 +2036,34 @@ void MujocoQuickItem::onRenderOverlay(unsigned int targetFbo, int viewWidth, int
     if (m_axisGizmo.alwaysOnTop())
         axisLines = m_axisGizmo.overlayLinesCopy();
 
-    if (!anyVisible && gizmoLines.empty() && axisLines.empty()) return;
+    // 碰撞点标记：拷一份点集 + 读样式；闪烁相位用墙钟（steady_clock），这样
+    // 仿真暂停时标记仍继续闪。blinkMilliHz==0 => 常亮；否则半周期内不画。
+    std::vector<float> markerPts;
+    float     markerSizePx = 0.0f;
+    QVector4D markerFill, markerOutline;
+    bool      markersOn = false;
+    {
+        std::lock_guard<std::mutex> lk(m_contactMarkerMtx);
+        if (m_contactMarkersEnabled.load() && !m_contactMarkerPts.empty()) {
+            const int mHz = m_contactMarkerBlinkMilliHz.load();
+            bool showPhase = true;
+            if (mHz > 0) {
+                const double t = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                const double period = 1000.0 / static_cast<double>(mHz);
+                showPhase = std::fmod(t, period) < period * 0.5;  // 前半周期显示
+            }
+            if (showPhase) {
+                markerPts = m_contactMarkerPts;   // 点数很少，拷贝廉价
+                markerSizePx = m_contactMarkerSizePx;
+                markerFill = m_contactMarkerFill;
+                markerOutline = m_contactMarkerOutline;
+                markersOn = true;
+            }
+        }
+    }
+
+    if (!anyVisible && gizmoLines.empty() && axisLines.empty() && !markersOn) return;
     if (!m_pointRenderer) m_pointRenderer.reset(new PointCloudRenderer());
 
     // 相机：与 mjr_render 的 setView 一致，mono 取 camera[0]/camera[1] 的平均。
@@ -1962,6 +2106,13 @@ void MujocoQuickItem::onRenderOverlay(unsigned int targetFbo, int viewWidth, int
     for (const DrawItem& it : draws) {
         if (!it.visible) continue;
         m_pointRenderer->drawCloud(it.id, it.style, it.size, it.color);
+    }
+    // 碰撞点标记：点云之后、gizmo 之前；固定像素圆点、关深度（always-on-top）。
+    if (markersOn) {
+        m_pointRenderer->drawMarkers(markerPts.data(),
+                                     static_cast<int>(markerPts.size() / 3),
+                                     markerSizePx, markerFill, markerOutline,
+                                     /*depthTest=*/false);
     }
     // gizmo 最后画、且关掉深度测试 → 永远盖在场景（含点云）之上。
     for (const DragTeachGizmo::LineBatch& b : gizmoLines) {
@@ -4751,6 +4902,9 @@ void MujocoQuickItem::physicsThreadMain() {
             if (sim.pause_update) mju_copy(d->qacc_warmstart, d->qacc, m->nv);
             sim.speed_changed = true;
         }
+        // 碰撞点标记采样：仍在 sim.mtx 锁内，d->contact 对本线程稳定。
+        // 覆盖运行/暂停(mj_forward 分支)/手动单步，enabled 时才有实际开销。
+        sampleContactMarkersLocked(m, d);
         // 时钟推进了：唤醒在 waitUntilSimulationSeconds 上等待的线程（脚本线程）
         if (sim.run) m_simClockCv.notify_all();
         if (kSimClockDebug) {

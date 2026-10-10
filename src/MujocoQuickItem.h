@@ -430,6 +430,39 @@ public:
     QVector<QVector3D> pointCloudPointsRaw(int cloudId) const;
 
     // ------------------------------------------------------------------
+    // 碰撞点标记（固定像素圆点 overlay，闪烁，不随相机推拉缩放，不吃深度测试）
+    // ------------------------------------------------------------------
+    // 用途：MuJoCo 自带的接触点显示（mjVIS_CONTACTPOINT）是世界尺寸的实体圆柱，
+    // 远看过大、又参与深度测试会被物体挡住。本标记是固定像素大小的圆点、画在最前、
+    // 会闪烁，便于快速定位碰撞位置。数据源为 d->contact。coal 注入的接触也在同一
+    // 张表里，一视同仁。
+    //
+    // 两种采样模式（setContactMarkerMode 切换）：
+    //   ContactMarkerDeepestPerPair（默认）—— 每对碰撞 body 只取穿透最深处一个点
+    //     （与"整块变红"同口径，画面最干净）。
+    //   ContactMarkerAllPoints       —— 画出所有穿透接触点（面-面接触会一次冒出
+    //     几十个点，更能反映接触区域，但更密）。
+    enum ContactMarkerMode {
+        ContactMarkerDeepestPerPair = 0,
+        ContactMarkerAllPoints      = 1
+    };
+    Q_ENUM(ContactMarkerMode)
+
+    Q_INVOKABLE void setContactMarkersEnabled(bool enabled);
+    Q_INVOKABLE bool contactMarkersEnabled() const;
+    // 单点 / 多点模式切换，默认 ContactMarkerDeepestPerPair（单点）。
+    Q_INVOKABLE void setContactMarkerMode(ContactMarkerMode mode);
+    Q_INVOKABLE ContactMarkerMode contactMarkerMode() const;
+    // 圆点直径（像素），默认 12。
+    Q_INVOKABLE void setContactMarkerSize(float pixelDiameter);
+    // 填充色 / 描边色（默认亮黄 + 近黑描边）。
+    Q_INVOKABLE void setContactMarkerColors(const QVector4D& fill, const QVector4D& outline);
+    // 闪烁频率（Hz），默认 2.5；hz<=0 => 常亮不闪。
+    Q_INVOKABLE void setContactMarkerBlink(float hz);
+    // 当前标记点数（便于调试/验证）。
+    Q_INVOKABLE int  contactMarkerCount() const;
+
+    // ------------------------------------------------------------------
     // 场景物体查询与编辑接口
     // ------------------------------------------------------------------
 
@@ -1137,6 +1170,28 @@ private:
     // 查找 cloudId 对应的状态（须持 m_pointCloudMtx），未找到返回 nullptr。
     PointCloudState*       findPointCloud(int cloudId);
     const PointCloudState* findPointCloud(int cloudId) const;
+
+    // ------------------------------------------------------------------
+    // 碰撞点标记（固定像素圆点 overlay，闪烁，不吃深度测试）
+    // ------------------------------------------------------------------
+    // 物理线程在 mj_step/mj_forward 之后（持 sim.mtx）按 d->contact 采样，
+    // 每对碰撞 body 取穿透最深处一个点，写入 m_contactMarkerPts（扁平 xyz，
+    // m_contactMarkerMtx 保护）。渲染线程在 onRenderOverlay() 里读一份拷贝，
+    // 用固定像素圆点画在最前面（always-on-top）；闪烁相位用墙钟（steady_clock），
+    // 这样仿真暂停时标记仍继续闪。采样上限防止异常接触爆量。
+    static constexpr int kMaxContactMarkers = 256;
+    // 物理线程调用（须持 sim.mtx）：按当前 d->contact 刷新标记点集。
+    void sampleContactMarkersLocked(const mjModel* m, const mjData* d);
+
+    std::atomic<bool>   m_contactMarkersEnabled {false};
+    std::atomic<int>    m_contactMarkerMode {0};             // ContactMarkerMode
+    std::atomic<int>    m_contactMarkerBlinkMilliHz {2500}; // 闪烁频率（mHz，2.5Hz）
+    mutable std::mutex  m_contactMarkerMtx;
+    std::vector<float>  m_contactMarkerPts;        // xyz 扁平（世界坐标）
+    float               m_contactMarkerSizePx = 12.0f;
+    QVector4D           m_contactMarkerFill    {1.0f, 0.95f, 0.15f, 1.0f}; // 亮黄
+    QVector4D           m_contactMarkerOutline {0.1f, 0.1f, 0.1f, 1.0f};   // 近黑描边
+
 
     // 必须在 m_sim->mtx 锁内调用：把 m_userScene 尾部的轨迹段全部重建
     //（末尾再让 m_gizmo.rebuildGeoms 追加 gizmo 段并写 ngeom）。
