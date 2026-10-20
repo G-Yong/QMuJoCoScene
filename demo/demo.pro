@@ -44,6 +44,9 @@ INCLUDEPATH += $$PWD/../thirdparty/assimp_x64-windows/include
 CONFIG(debug, debug|release) {
     LIBS += -L$$PWD/../thirdparty/coal/debug/lib -lcoald
     LIBS += -L$$PWD/../thirdparty/assimp_x64-windows/debug/lib -lassimp-vc142-mtd
+    # 注意：仓库不再附带 Debug 版 assimp 运行时（assimp-vc142-mtd.dll，约 18MB）。
+    # Debug 版 demo 可以正常链接，但运行前需要把 vcpkg 里的
+    # assimp_x64-windows/debug/bin/assimp-vc142-mtd.dll 放到 PATH 或可执行文件旁。
 } else {
     LIBS += -L$$PWD/../thirdparty/coal/lib -lcoal
     LIBS += -L$$PWD/../thirdparty/assimp_x64-windows/lib -lassimp-vc142-mt
