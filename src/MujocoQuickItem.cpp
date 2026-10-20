@@ -809,13 +809,47 @@ bool MujocoQuickItem::saveKeyframe() {
 }
 
 bool MujocoQuickItem::saveSceneAsXml(const QString& filename) {
-    bool applied = false;
+    bool saved = false;
     withSimulateLocked([&](mujoco::Simulate& sim) {
-        if (!sim.m_) return;
-        sim.pending_.save_xml = filename.toStdString();
-        applied = true;
+        if (!sim.m_) {
+            setLastError(QStringLiteral("Scene is not loaded"));
+            return;
+        }
+        if (!m_editSpec) {
+            setLastError(QStringLiteral("Current scene has no editable MuJoCo spec; load an XML scene before saving as XML"));
+            return;
+        }
+
+        // 不能走 vendored Simulate 的 pending_.save_xml（即 mj_saveLastXML）：我们的加载
+        // 路径是 mj_parseXML(+String) + mj_compile，没有登记「最后加载的 XML」，
+        // mj_saveLastXML 会直接返回 "No XML model loaded"。这里改为：
+        //   1) 把编译期模型上的运行时改动（拖动/摆放/缩放/新增物体）回写进 spec；
+        //   2) 用 mj_saveXML 从 spec 写出（3.16 起 copyBack 会拒绝 spec 表达不了的改动，
+        //      并给出元素名，比静默丢弃好）。
+        // 直接改 m_editSpec 是有意的：copyBack 失败时不会拷贝任何值，成功后 spec 与
+        // 模型保持一致（与 addPrimitive 的流程相同）。
+        if (!mj_copyBack(m_editSpec, sim.m_)) {
+            const char* specErr = mjs_getError(m_editSpec);
+            const QString reason = specErr && specErr[0]
+                ? QString::fromUtf8(specErr)
+                : QStringLiteral("Failed to copy current model values back to MuJoCo spec");
+            setLastError(reason);
+            return;
+        }
+
+        char error[kErrorLength] = "";
+        const QByteArray utf8Path = filename.toUtf8();
+        // mj_saveXML 的约定是 0 = 成功、-1 = 失败（与 mj_saveLastXML 的 1/0 相反）。
+        if (mj_saveXML(m_editSpec, utf8Path.constData(), error, sizeof(error)) != 0) {
+            setLastError(error[0] ? QString::fromUtf8(error)
+                                  : QStringLiteral("Failed to save scene XML"));
+            return;
+        }
+
+        setLastError(QString());
+        saved = true;
     });
-    return applied;
+    return saved;
 }
 
 bool MujocoQuickItem::saveSceneAsMjb(const QString& filename) {
@@ -911,8 +945,13 @@ QVariantList MujocoQuickItem::addPrimitiveRequests(const QVariantList& types,
         }
 
         if (!mj_copyBack(spec, m_sim->m_)) {
+            // MuJoCo 3.16 起 copyBack 会拒绝“spec 表达不了”的运行时改动，并给出元素名。
+            const char* specErr = mjs_getError(spec);
+            const QString reason = specErr && specErr[0]
+                ? QString::fromUtf8(specErr)
+                : QStringLiteral("Failed to copy current model values back to MuJoCo spec");
             mj_deleteSpec(spec);
-            setLastError(QStringLiteral("Failed to copy current model values back to MuJoCo spec"));
+            setLastError(reason);
             return {};
         }
 
@@ -2486,8 +2525,13 @@ QVariantList MujocoQuickItem::addStaticObstacleRequests(const QVariantList& type
         }
 
         if (!mj_copyBack(spec, m_sim->m_)) {
+            // MuJoCo 3.16 起 copyBack 会拒绝“spec 表达不了”的运行时改动，并给出元素名。
+            const char* specErr = mjs_getError(spec);
+            const QString reason = specErr && specErr[0]
+                ? QString::fromUtf8(specErr)
+                : QStringLiteral("Failed to copy current model values back to MuJoCo spec");
             mj_deleteSpec(spec);
-            setLastError(QStringLiteral("Failed to copy current model values back to MuJoCo spec"));
+            setLastError(reason);
             return {};
         }
 
@@ -2614,13 +2658,20 @@ static bool setBodyGeomSize(mjModel* model, int bodyId, const QVector3D& size)
     const mjtNum sx = positiveOr(size.x(), 0.001);
     const mjtNum sy = positiveOr(size.y(), sx);
     const mjtNum sz = positiveOr(size.z(), sy);
+    int written = 0;
     for (int i = 0; i < geomCount; ++i) {
-        mjtNum* geomSize = model->geom_size + 3 * (firstGeom + i);
+        const int geomId = firstGeom + i;
+        // mesh geom 的 size 是编译期从 mesh 资源算出的包围盒，不是可写属性。MuJoCo 3.16
+        // 起改动它会让 mj_copyBack / mj_saveLastXML 直接报错（“the size of a mesh geom
+        // was changed in the model”），所以这里跳过。
+        if (model->geom_type[geomId] == mjGEOM_MESH) continue;
+        mjtNum* geomSize = model->geom_size + 3 * geomId;
         geomSize[0] = sx;
         geomSize[1] = sy;
         geomSize[2] = sz;
+        ++written;
     }
-    return true;
+    return written > 0;
 }
 
 static bool scaleBodyGeoms(mjModel* model, int bodyId, const QVector3D& scale)
@@ -2633,13 +2684,19 @@ static bool scaleBodyGeoms(mjModel* model, int bodyId, const QVector3D& scale)
     const mjtNum sx = positiveOr(scale.x(), 1.0);
     const mjtNum sy = positiveOr(scale.y(), sx);
     const mjtNum sz = positiveOr(scale.z(), sy);
+    int written = 0;
     for (int i = 0; i < geomCount; ++i) {
-        mjtNum* geomSize = model->geom_size + 3 * (firstGeom + i);
+        const int geomId = firstGeom + i;
+        // 同 setBodyGeomSize：mesh geom 的 size 由 mesh 资源决定，写脏会导致
+        // MuJoCo 3.16 的 mj_copyBack / mj_saveLastXML 失败。
+        if (model->geom_type[geomId] == mjGEOM_MESH) continue;
+        mjtNum* geomSize = model->geom_size + 3 * geomId;
         geomSize[0] *= sx;
         geomSize[1] *= sy;
         geomSize[2] *= sz;
+        ++written;
     }
-    return true;
+    return written > 0;
 }
 
 int MujocoQuickItem::objectCount() const

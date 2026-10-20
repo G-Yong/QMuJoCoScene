@@ -180,9 +180,11 @@ public:
     Q_INVOKABLE void closeScene();
     // lastError: 最近一次加载失败的错误信息 (中文/英文均可，由底层提供)。
     Q_INVOKABLE QString lastError() const;
-    // saveModelAsXml: 将当前已编译的模型以 MJCF XML 格式写入 filename。
-    //   注意：外部资源（mesh/纹理）不嵌入，仅保留引用路径。
-    //   需要模型已加载；通过 pending 机制在渲染循环下一帧执行。
+    // saveSceneAsXml: 将当前场景以 MJCF XML 格式写入 filename。
+    //   先 mj_copyBack 把编译期模型上的运行时改动（拖动/摆放/缩放/新增物体）写回 mjSpec，
+    //   再用 mj_saveXML 写出。同步执行：成功返回 true；失败返回 false，原因见 lastError()。
+    //   注意：外部资源（mesh/纹理）不嵌入，仅保留引用路径；只有由 XML 加载的场景才有
+    //   可编辑 spec（.mjb 场景会返回 false）。
     Q_INVOKABLE bool saveSceneAsXml(const QString& filename);
     // saveSceneAsMjb: 将当前已编译的模型以 MuJoCo 二进制格式（.mjb）写入 filename。
     //   完全自包含：内嵌所有 mesh/纹理数据，无需原始资源文件即可重新加载。
