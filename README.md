@@ -69,7 +69,7 @@ Qt Main Thread
 | Component | Version |
 |---|---|
 | Qt | 5.15.2 (requires `quick` and `opengl` modules) |
-| MuJoCo | 3.15.0 Windows x86_64 |
+| MuJoCo | 3.16.0 Windows x86_64 |
 | Compiler | MSVC 2019 64-bit (`/utf-8`) |
 | OpenGL | 3.3 Compatibility Profile |
 
@@ -176,7 +176,7 @@ were added to `Simulate`, then exposed to QML through the
 
 Both patches touch `simulate/simulate.cc` (and `status-overlay.patch` also modifies
 `simulate/simulate.h`). The files in `patches/` always target the **currently vendored**
-release and embed its directory name (`mujoco-3.15.0-windows-x86_64/...`), so
+release and embed its directory name (`mujoco-3.16.0-windows-x86_64/...`), so
 `git apply --directory=...` does **not** work — rewrite the version prefix into temporary
 copies and apply from the repository root. Patches for older releases are kept under
 `patches/<version>/`.
@@ -184,9 +184,9 @@ copies and apply from the repository root. Patches for older releases are kept u
 1. Place the new `mujoco-X.Y.Z-windows-x86_64/` directory alongside this repository and update `MUJOCO_DIR` in `src/qmujocoscene.pri`.
 2. From the repository root, run (replace `X.Y.Z` with the actual new version):
    ```bash
-   sed 's/mujoco-3\.15\.0-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
+   sed 's/mujoco-3\.16\.0-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
        patches/status-overlay.patch        > /tmp/status-overlay.patch
-   sed 's/mujoco-3\.15\.0-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
+   sed 's/mujoco-3\.16\.0-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
        patches/user-scn-managed-mode.patch > /tmp/user-scn-managed-mode.patch
 
    git apply --ignore-whitespace /tmp/status-overlay.patch
@@ -195,8 +195,9 @@ copies and apply from the repository root. Patches for older releases are kept u
    `--ignore-whitespace` is required because upstream runs clang-format across releases,
    which realigns identifiers and re-wraps long calls; the change sites themselves do not
    move. Two further caveats:
-   - Upstream source archives are LF while the vendored trees here are CRLF — normalize
-     line endings first, otherwise `git apply` rejects the context wholesale.
+   - The Windows zip ships `simulate/*` with CRLF; this repository normalizes the vendored
+     copies to LF before generating/applying patches, otherwise `git apply` rejects the
+     context wholesale. (GitHub raw sources are LF already.)
    - If `git apply` still refuses a hunk, use `git apply --reject` and merge the leftovers
      in `*.rej` by hand against the change sites below.
 

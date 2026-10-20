@@ -69,7 +69,7 @@ Qt 主线程
 | 组件 | 版本 |
 |---|---|
 | Qt | 5.15.2（需含 `quick`、`opengl` 模块）|
-| MuJoCo | 3.15.0 Windows x86_64 |
+| MuJoCo | 3.16.0 Windows x86_64 |
 | 编译器 | MSVC 2019 64-bit（`/utf-8`）|
 | OpenGL | 3.3 Compatibility Profile |
 
@@ -173,16 +173,16 @@ MuJoCo 官方提供了丰富的示例模型，可在 [MuJoCo 模型库](https://
 
 两个补丁都作用于 `simulate/simulate.cc`（其中 `status-overlay.patch` 还会改
 `simulate/simulate.h`）。`patches/` 里的补丁**始终对应当前 vendored 的那个版本**，
-路径里写死的是它的目录名（`mujoco-3.15.0-windows-x86_64/...`），所以
+路径里写死的是它的目录名（`mujoco-3.16.0-windows-x86_64/...`），所以
 `git apply --directory=...` **不适用**——应把版本前缀改写进临时副本后在仓库根目录应用；
 旧版本的补丁保留在 `patches/<version>/` 下。
 
 1. 将新版 `mujoco-X.Y.Z-windows-x86_64/` 目录放到本仓库同级目录，更新 `src/qmujocoscene.pri` 中的 `MUJOCO_DIR`。
 2. 在仓库根目录执行（把 `X.Y.Z` 换成实际新版本号）：
    ```bash
-   sed 's/mujoco-3\.15\.0-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
+   sed 's/mujoco-3\.16\.0-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
        patches/status-overlay.patch        > /tmp/status-overlay.patch
-   sed 's/mujoco-3\.15\.0-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
+   sed 's/mujoco-3\.16\.0-windows-x86_64/mujoco-X.Y.Z-windows-x86_64/g' \
        patches/user-scn-managed-mode.patch > /tmp/user-scn-managed-mode.patch
 
    git apply --ignore-whitespace /tmp/status-overlay.patch
@@ -190,8 +190,8 @@ MuJoCo 官方提供了丰富的示例模型，可在 [MuJoCo 模型库](https://
    ```
    必须带 `--ignore-whitespace`：上游每个版本都会跑 clang-format，会重新对齐变量名、
    重排长调用的换行，但改动点本身没移动。另有两点要注意：
-   - 上游源码包是 LF，而本仓库 vendored 目录是 CRLF —— 先统一换行符，
-     否则 `git apply` 会因上下文整块不匹配而失败。
+   - 上游 Windows zip 里的 `simulate/*` 是 CRLF；本仓库在生成/应用补丁前统一归一化成 LF，
+     否则 `git apply` 会因上下文整块不匹配而失败（GitHub raw 源本来就是 LF）。
    - 若仍有 hunk 被拒，用 `git apply --reject`，再按下面的改动点手工合并 `*.rej`。
 
 3. `patches/status-overlay.patch`，共 **6 处改动**（`simulate.cc` 4 处、`simulate.h` 2 处）：

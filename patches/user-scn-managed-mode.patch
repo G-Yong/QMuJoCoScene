@@ -1,7 +1,7 @@
-diff --git a/mujoco-3.15.0-windows-x86_64/simulate/simulate.cc b/mujoco-3.15.0-windows-x86_64/simulate/simulate.cc
+diff --git a/mujoco-3.16.0-windows-x86_64/simulate/simulate.cc b/mujoco-3.16.0-windows-x86_64/simulate/simulate.cc
 index cc94fb1..6300c38 100644
---- a/mujoco-3.15.0-windows-x86_64/simulate/simulate.cc
-+++ b/mujoco-3.15.0-windows-x86_64/simulate/simulate.cc
+--- a/mujoco-3.16.0-windows-x86_64/simulate/simulate.cc
++++ b/mujoco-3.16.0-windows-x86_64/simulate/simulate.cc
 @@ -2349,6 +2349,33 @@ void Simulate::Sync(bool state_only) {
    // update scene or sync data from user in passive mode
    if (!is_passive_) {

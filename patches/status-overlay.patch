@@ -1,7 +1,7 @@
-diff --git a/mujoco-3.15.0-windows-x86_64/simulate/simulate.cc b/mujoco-3.15.0-windows-x86_64/simulate/simulate.cc
+diff --git a/mujoco-3.16.0-windows-x86_64/simulate/simulate.cc b/mujoco-3.16.0-windows-x86_64/simulate/simulate.cc
 index cc94fb1..75ff330 100644
---- a/mujoco-3.15.0-windows-x86_64/simulate/simulate.cc
-+++ b/mujoco-3.15.0-windows-x86_64/simulate/simulate.cc
+--- a/mujoco-3.16.0-windows-x86_64/simulate/simulate.cc
++++ b/mujoco-3.16.0-windows-x86_64/simulate/simulate.cc
 @@ -92,6 +92,20 @@ inline void Copy(T& dst, const T& src) {
  
  const double zoom_increment = 0.02;  // ratio of one click-wheel zoom increment to vertical extent
@@ -74,10 +74,10 @@ index cc94fb1..75ff330 100644
                  nullptr,
                  &this->platform_ui->mjr_context());
    }
-diff --git a/mujoco-3.15.0-windows-x86_64/simulate/simulate.h b/mujoco-3.15.0-windows-x86_64/simulate/simulate.h
+diff --git a/mujoco-3.16.0-windows-x86_64/simulate/simulate.h b/mujoco-3.16.0-windows-x86_64/simulate/simulate.h
 index 8b5ae73..77aec96 100644
---- a/mujoco-3.15.0-windows-x86_64/simulate/simulate.h
-+++ b/mujoco-3.15.0-windows-x86_64/simulate/simulate.h
+--- a/mujoco-3.16.0-windows-x86_64/simulate/simulate.h
++++ b/mujoco-3.16.0-windows-x86_64/simulate/simulate.h
 @@ -200,6 +200,7 @@ class Simulate {
    int profiler     = 0;
    int sensor       = 0;
