@@ -38,6 +38,10 @@ constexpr int   kRingProbeSamples  = 16;
 constexpr float kHitTolPx          = 8.0f;
 constexpr float kTwoPi             = 6.28318530717958647692f;
 
+// 拖动时沿激活轴画的贯穿全场辅助线（世界米半长 + 像素线宽），与 TCP gizmo 同口径。
+constexpr float kGuideLineHalfLen = 1000.0f;
+constexpr float kGuideLineWidthPx = 1.0f;
+
 // 旋转轴：橙黄；平移轴：青。hover/active 提亮。
 void axisColor(AxisGizmo::Kind kind, float k, float out[4]) {
     const float base[2][3] = {{1.00f, 0.62f, 0.10f}, {0.15f, 0.85f, 0.85f}};
@@ -190,9 +194,9 @@ int AxisGizmo::rebuildGeoms(mjvScene* userScene, int startIndex) {
         for (int k = 0; k < 2; ++k)
             b->rgba.insert(b->rgba.end(), {color[0], color[1], color[2], color[3]});
     };
-    auto addLine = [&](const QVector3D& p0, const QVector3D& p1,
-                       const float color[4], float widthPx) {
-        if (m_alwaysOnTop) { pushOverlay(p0, p1, color, widthPx); return; }
+    // 直写 user_scn 的线段：交给 MuJoCo 正常管线渲染，参与深度测试（会被场景物体遮挡）。
+    auto addSceneLine = [&](const QVector3D& p0, const QVector3D& p1,
+                            const float color[4], float widthPx) {
         if (g >= maxg) return;
         mjvGeom* geom = &userScene->geoms[g];
         mjv_initGeom(geom, mjGEOM_LINE, nullptr, nullptr, nullptr, color);
@@ -200,6 +204,12 @@ int AxisGizmo::rebuildGeoms(mjvScene* userScene, int startIndex) {
         const mjtNum to[3]   = { p1.x(), p1.y(), p1.z() };
         mjv_connector(geom, mjGEOM_LINE, widthPx, from, to);
         ++g;
+    };
+
+    auto addLine = [&](const QVector3D& p0, const QVector3D& p1,
+                       const float color[4], float widthPx) {
+        if (m_alwaysOnTop) { pushOverlay(p0, p1, color, widthPx); return; }
+        addSceneLine(p0, p1, color, widthPx);
     };
 
     if (m_visible) {
@@ -243,12 +253,27 @@ int AxisGizmo::rebuildGeoms(mjvScene* userScene, int startIndex) {
                 }
             }
         }
+
+        // 拖动辅助线：沿激活轴（旋转 = 旋转轴 / 平移 = 平移轴）画一条贯穿全场的线。
+        // 与 TCP gizmo 的辅助线一致：**始终写 user_scn、参与深度测试**（会被场景物体遮挡），
+        // 不走 always-on-top 叠加层，否则会永远盖在物体最前面。
+        if (m_dragging && m_active >= 0 && m_active < int(m_axes.size())) {
+            const Axis& act = m_axes[m_active];
+            if (act.valid) {
+                float color[4];
+                axisColor(act.kind, 1.0f, color);
+                addSceneLine(act.anchor - act.axis * kGuideLineHalfLen,
+                             act.anchor + act.axis * kGuideLineHalfLen,
+                             color, kGuideLineWidthPx);
+            }
+        }
     }
 
-    if (!m_alwaysOnTop) userScene->ngeom = std::min(g, maxg);
+    // always-on-top 时辅助线仍会写 user_scn（g 前进），所以 ngeom 必须无条件推进。
+    userScene->ngeom = std::min(g, maxg);
     std::lock_guard<std::mutex> lk(m_overlayMtx);
     m_overlayLines.swap(overlay);
-    return m_alwaysOnTop ? startIndex : std::min(g, maxg);
+    return userScene->ngeom;
 }
 
 int AxisGizmo::hitTest(const QPointF& mouse, const QMatrix4x4& vp, float w, float h) const {
