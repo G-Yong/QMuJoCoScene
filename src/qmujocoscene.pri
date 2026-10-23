@@ -6,12 +6,16 @@ HEADERS += \
     $$PWD/DragTeachGizmo.h \
     $$PWD/AxisGizmo.h \
     $$PWD/PointCloudRenderer.h \
+    $$PWD/OverlayCamera.h \
+    $$PWD/OutlineRenderer.h \
+    $$PWD/OutlineTypes.h \
     $$PWD/simulationtypes.h \
     $$PWD/lodepng.h
 
 SOURCES += \
     $$PWD/QtPlatformUIAdapter.cpp \
     $$PWD/PointCloudRenderer.cpp \
+    $$PWD/OutlineRenderer.cpp \
     $$PWD/DragTeachGizmo.cpp \
     $$PWD/AxisGizmo.cpp \
     $$PWD/MujocoQuickItem.cpp

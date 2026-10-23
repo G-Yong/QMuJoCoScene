@@ -2,6 +2,7 @@
 #include "MujocoQuickItemHelpers.h"
 #include "QtPlatformUIAdapter.h"
 #include "PointCloudRenderer.h"
+#include "OutlineRenderer.h"
 
 #include "simulate.h"
 #include <mujoco/mujoco.h>
@@ -1957,6 +1958,68 @@ int MujocoQuickItem::contactMarkerCount() const {
     return static_cast<int>(m_contactMarkerPts.size() / 3);
 }
 
+// ---------------------------------------------------------------------------
+// 整场景描边（线稿叠加）
+// ---------------------------------------------------------------------------
+
+void MujocoQuickItem::setOutlineEnabled(bool enabled) {
+    m_outlineEnabled.store(enabled);
+}
+
+bool MujocoQuickItem::outlineEnabled() const {
+    return m_outlineEnabled.load();
+}
+
+void MujocoQuickItem::setOutlineColor(const QVector4D& rgba) {
+    std::lock_guard<std::mutex> lk(m_outlineMtx);
+    m_outlineColor = rgba;
+}
+
+QVector4D MujocoQuickItem::outlineColor() const {
+    std::lock_guard<std::mutex> lk(m_outlineMtx);
+    return m_outlineColor;
+}
+
+void MujocoQuickItem::setOutlineWidthPx(float px) {
+    std::lock_guard<std::mutex> lk(m_outlineMtx);
+    m_outlineWidthPx = qBound(1.0f, px, 8.0f);
+}
+
+float MujocoQuickItem::outlineWidthPx() const {
+    std::lock_guard<std::mutex> lk(m_outlineMtx);
+    return m_outlineWidthPx;
+}
+
+void MujocoQuickItem::setOutlineCreasesEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lk(m_outlineMtx);
+    m_outlineCreases = enabled;
+}
+
+bool MujocoQuickItem::outlineCreasesEnabled() const {
+    std::lock_guard<std::mutex> lk(m_outlineMtx);
+    return m_outlineCreases;
+}
+
+void MujocoQuickItem::setOutlineCreaseAngleDeg(float deg) {
+    std::lock_guard<std::mutex> lk(m_outlineMtx);
+    m_outlineCreaseAngleDeg = qBound(1.0f, deg, 179.0f);
+}
+
+float MujocoQuickItem::outlineCreaseAngleDeg() const {
+    std::lock_guard<std::mutex> lk(m_outlineMtx);
+    return m_outlineCreaseAngleDeg;
+}
+
+void MujocoQuickItem::setOutlineDepthThreshold(float rel) {
+    std::lock_guard<std::mutex> lk(m_outlineMtx);
+    m_outlineDepthThreshold = qBound(1e-4f, rel, 1.0f);
+}
+
+float MujocoQuickItem::outlineDepthThreshold() const {
+    std::lock_guard<std::mutex> lk(m_outlineMtx);
+    return m_outlineDepthThreshold;
+}
+
 // 物理线程（持 sim.mtx）：按当前 d->contact 刷新标记点集。
 // 两种模式（m_contactMarkerMode）：单点 = 每对碰撞 body 取穿透最深处一个点；
 // 多点 = 画出所有穿透接触点。两者口径一致：仅计穿透接触（dist<0）、被求解器
@@ -2025,6 +2088,31 @@ void MujocoQuickItem::sampleContactMarkersLocked(const mjModel* m, const mjData*
 
     std::lock_guard<std::mutex> lk(m_contactMarkerMtx);
     m_contactMarkerPts.swap(pts);
+}
+
+// 物理线程（持 sim.mtx）：刷新每个 geom 的世界位姿快照，供渲染线程的描边
+// G-buffer 使用。几何类型/尺寸/mesh id 是编译期属性，一并拷进来，渲染线程
+// 就只需要读 mesh 顶点数组（mjModel 在渲染线程本来就可读，mjr_render 也这么做）。
+void MujocoQuickItem::sampleOutlineGeomsLocked(const mjModel* m, const mjData* d) {
+    if (!m_outlineEnabled.load()) return;
+    if (!m || !d) return;
+
+    std::vector<OutlineGeomSample> samples(static_cast<size_t>(std::max(0, static_cast<int>(m->ngeom))));
+    for (int g = 0; g < static_cast<int>(m->ngeom); ++g) {
+        OutlineGeomSample& s = samples[static_cast<size_t>(g)];
+        s.geomId   = g;
+        s.geomType = m->geom_type[g];
+        s.meshId   = (s.geomType == mjGEOM_MESH) ? m->geom_dataid[g] : -1;
+        for (int k = 0; k < 3; ++k) {
+            s.size[k] = static_cast<float>(m->geom_size[3 * g + k]);
+            s.xpos[k] = static_cast<float>(d->geom_xpos[3 * g + k]);
+        }
+        for (int k = 0; k < 9; ++k)
+            s.xmat[k] = static_cast<float>(d->geom_xmat[9 * g + k]);
+    }
+
+    std::lock_guard<std::mutex> lk(m_outlineMtx);
+    m_outlineSamples.swap(samples);
 }
 
 // 渲染线程：把点云用 GL_POINTS 画进 MuJoCo 离屏 FBO（共享深度，正确互遮挡），
@@ -2102,7 +2190,23 @@ void MujocoQuickItem::onRenderOverlay(unsigned int targetFbo, int viewWidth, int
         }
     }
 
-    if (!anyVisible && gizmoLines.empty() && axisLines.empty() && !markersOn) return;
+    // 整场景描边：拷一份样式 + geom 位姿快照（物理线程写、这里只读）。
+    OutlineStyle outlineStyle;
+    std::vector<OutlineGeomSample> outlineSamples;
+    bool outlineOn = m_outlineEnabled.load(std::memory_order_relaxed);
+    if (outlineOn) {
+        std::lock_guard<std::mutex> lk(m_outlineMtx);
+        outlineStyle.color = m_outlineColor;
+        outlineStyle.widthPx = m_outlineWidthPx;
+        outlineStyle.creases = m_outlineCreases;
+        outlineStyle.creaseAngleDeg = m_outlineCreaseAngleDeg;
+        outlineStyle.depthThreshold = m_outlineDepthThreshold;
+        outlineSamples = m_outlineSamples;
+    }
+    outlineOn = outlineOn && !outlineSamples.empty();
+
+    if (!anyVisible && gizmoLines.empty() && axisLines.empty() && !markersOn && !outlineOn)
+        return;
     if (!m_pointRenderer) m_pointRenderer.reset(new PointCloudRenderer());
 
     // 相机：与 mjr_render 的 setView 一致，mono 取 camera[0]/camera[1] 的平均。
@@ -2124,6 +2228,37 @@ void MujocoQuickItem::onRenderOverlay(unsigned int targetFbo, int viewWidth, int
         sceneW = cw;
         sceneH = ch;
     }
+    // 叠加层共用相机（点云 / 描边 / 命中测试同一套矩阵，避免各自跑偏）。
+    const OverlayCamera overlayCam = buildOverlayCamera(
+        viewWidth, viewHeight, sceneX, sceneY, sceneW, sceneH,
+        cam.pos, cam.forward, cam.up,
+        cam.frustum_center, cam.frustum_width, cam.frustum_bottom, cam.frustum_top,
+        cam.frustum_near, cam.frustum_far, cam.orthographic != 0,
+        scn.enabletransform != 0, scn.translate, scn.rotate, scn.scale,
+        PointCloudRenderer::clipControlSupported());
+
+    // 描边第一步：把可见 geom 的法线/深度画进自建 G-buffer。放在点云之前，
+    // 因为它是独立 FBO + 独立状态；线本身在点云之后合成。
+    if (outlineOn) {
+        const mjModel* outlineModel = m_sim->m_;
+        std::vector<unsigned char> visibleGeom;
+        if (outlineModel) {
+            const int ngeom = static_cast<int>(outlineModel->ngeom);
+            visibleGeom.assign(static_cast<size_t>(std::max(0, ngeom)), 0);
+            for (int i = 0; i < scn.ngeom; ++i) {
+                const mjvGeom& g = scn.geoms[i];
+                // user_scn 图元（点云/轨迹/gizmo）的 objtype 是 mjOBJ_UNKNOWN，
+                // 这里只保留真实 geom，避免给点云和辅助线描边。
+                if (g.objtype != mjOBJ_GEOM || g.objid < 0 || g.objid >= ngeom)
+                    continue;
+                visibleGeom[static_cast<size_t>(g.objid)] = 1;
+            }
+        }
+        if (!m_outlineRenderer) m_outlineRenderer.reset(new OutlineRenderer());
+        m_outlineRenderer->buildGeometry(overlayCam, outlineModel,
+                                         outlineSamples, visibleGeom);
+    }
+
     m_pointRenderer->beginFrame(
         targetFbo, viewWidth, viewHeight,
         sceneX, sceneY, sceneW, sceneH,
@@ -2145,6 +2280,12 @@ void MujocoQuickItem::onRenderOverlay(unsigned int targetFbo, int viewWidth, int
     for (const DrawItem& it : draws) {
         if (!it.visible) continue;
         m_pointRenderer->drawCloud(it.id, it.style, it.size, it.color);
+    }
+    // 描边第二步：全屏边缘检测 → 把线混合到场景上。位置在点云之后、
+    // 接触点标记与 gizmo 之前（UI 类叠加层保持在最上层）。
+    if (outlineOn) {
+        if (!m_outlineRenderer) m_outlineRenderer.reset(new OutlineRenderer());
+        m_outlineRenderer->composite(targetFbo, overlayCam, outlineStyle);
     }
     // 碰撞点标记：点云之后、gizmo 之前；固定像素圆点、关深度（always-on-top）。
     if (markersOn) {
@@ -4719,6 +4860,8 @@ void MujocoQuickItem::renderThreadMain() {
 
     // 释放点云 GPU 资源（仍在渲染线程、GL context 当前）。
     if (m_pointRenderer) m_pointRenderer->releaseGL();
+    // 描边 G-buffer / 网格缓存 / program 同理。
+    if (m_outlineRenderer) m_outlineRenderer->releaseGL();
 
     // 释放适配器持有的 GL 资源（共享纹理 / FBO），此时 GL context 仍在当前线程
     if (m_adapterRaw) {
@@ -4962,6 +5105,8 @@ void MujocoQuickItem::physicsThreadMain() {
         // 碰撞点标记采样：仍在 sim.mtx 锁内，d->contact 对本线程稳定。
         // 覆盖运行/暂停(mj_forward 分支)/手动单步，enabled 时才有实际开销。
         sampleContactMarkersLocked(m, d);
+        // 描边：geom 世界位姿快照（同样只在 enabled 时才有开销）。
+        sampleOutlineGeomsLocked(m, d);
         // 时钟推进了：唤醒在 waitUntilSimulationSeconds 上等待的线程（脚本线程）
         if (sim.run) m_simClockCv.notify_all();
         if (kSimClockDebug) {

@@ -45,6 +45,7 @@
 #include "IMujocoHost.h"
 #include "DragTeachGizmo.h"
 #include "AxisGizmo.h"
+#include "OutlineTypes.h"
 #include "simulationtypes.h"
 
 class QOpenGLContext;
@@ -66,6 +67,7 @@ namespace mujoco { class Simulate; }
 namespace mjqt { class QtPlatformUIAdapter; }
 
 class PointCloudRenderer;
+class OutlineRenderer;
 
 #ifndef MUJOCOQUICKITEM_EXPORT
 #  define MUJOCOQUICKITEM_EXPORT
@@ -463,6 +465,31 @@ public:
     Q_INVOKABLE void setContactMarkerBlink(float hz);
     // 当前标记点数（便于调试/验证）。
     Q_INVOKABLE int  contactMarkerCount() const;
+
+    // ------------------------------------------------------------------
+    // 整场景描边（线稿叠加）
+    // 屏幕空间后处理：自建法线+深度 G-buffer → 全屏边缘检测 → 只把"线"混合到
+    // 场景上，mjr_render 的光照/材质/贴图完全不变。默认关闭（关闭时零开销）。
+    // 细节见 docs/superpowers/specs/2026-10-22-scene-outline-design.md
+    // ------------------------------------------------------------------
+    Q_INVOKABLE void setOutlineEnabled(bool enabled);
+    Q_INVOKABLE bool outlineEnabled() const;
+    // 线颜色（含透明度），默认黑 (0,0,0,1)。
+    Q_INVOKABLE void setOutlineColor(const QVector4D& rgba);
+    Q_INVOKABLE QVector4D outlineColor() const;
+    // 线宽（像素），默认 1.2，夹到 [1, 8]。
+    Q_INVOKABLE void setOutlineWidthPx(float px);
+    Q_INVOKABLE float outlineWidthPx() const;
+    // 是否画同一物体内部的折痕线，默认 true。关掉只剩外轮廓（最干净）。
+    Q_INVOKABLE void setOutlineCreasesEnabled(bool enabled);
+    Q_INVOKABLE bool outlineCreasesEnabled() const;
+    // 折痕判定角（度），默认 60，夹到 [1, 179]。网格模型面片法线有噪声，
+    // 30° 会把面片噪声全画成线；60° 接近 CAD 的 shaded-with-edges 观感。
+    Q_INVOKABLE void setOutlineCreaseAngleDeg(float deg);
+    Q_INVOKABLE float outlineCreaseAngleDeg() const;
+    // 轮廓/物体交界的相对深度差阈值，默认 0.02，夹到 [1e-4, 1]。
+    Q_INVOKABLE void setOutlineDepthThreshold(float rel);
+    Q_INVOKABLE float outlineDepthThreshold() const;
 
     // ------------------------------------------------------------------
     // 场景物体查询与编辑接口
@@ -1193,6 +1220,26 @@ private:
     float               m_contactMarkerSizePx = 12.0f;
     QVector4D           m_contactMarkerFill    {1.0f, 0.95f, 0.15f, 1.0f}; // 亮黄
     QVector4D           m_contactMarkerOutline {0.1f, 0.1f, 0.1f, 1.0f};   // 近黑描边
+
+
+    // ------------------------------------------------------------------
+    // 整场景描边（线稿叠加）
+    // 物理线程在 mj_step/mj_forward 之后（持 sim.mtx）采样每个 geom 的世界位姿，
+    // 写入 m_outlineSamples（m_outlineMtx 保护，索引 = geomId）；渲染线程按
+    // scn.geoms 的可见集过滤后交给 OutlineRenderer 画进自建 G-buffer。
+    // ------------------------------------------------------------------
+    // 物理线程调用（须持 sim.mtx）：按当前 mjModel/mjData 刷新 geom 位姿快照。
+    void sampleOutlineGeomsLocked(const mjModel* m, const mjData* d);
+
+    std::atomic<bool>   m_outlineEnabled {false};
+    mutable std::mutex  m_outlineMtx;
+    std::vector<OutlineGeomSample> m_outlineSamples;
+    QVector4D           m_outlineColor {0.0f, 0.0f, 0.0f, 1.0f};
+    float               m_outlineWidthPx = 1.2f;
+    bool                m_outlineCreases = true;
+    float               m_outlineCreaseAngleDeg = 60.0f;
+    float               m_outlineDepthThreshold = 0.02f;
+    std::unique_ptr<OutlineRenderer> m_outlineRenderer;  // 仅渲染线程触碰其 GL 资源
 
 
     // 必须在 m_sim->mtx 锁内调用：把 m_userScene 尾部的轨迹段全部重建

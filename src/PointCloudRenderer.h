@@ -88,6 +88,11 @@ public:
                                           float sceneW, float sceneH,
                                           float fullW, float fullH);
 
+    // 当前 GL 上下文是否支持 ARB_clip_control（决定 MuJoCo 的 reverse-Z 采用
+    // ZERO_TO_ONE 还是 [-1,1] 映射）。进程内只查询一次。描边 G-buffer 的相机
+    // 构造（buildOverlayCamera）需要与 beginFrame() 拿到同一个答案。
+    static bool clipControlSupported();
+
     // 绘制一个点云。pointSize：Pixel 样式为像素，其余为世界半径（米）。
     // uniformColor 在该点云没有逐点颜色时使用。
     void drawCloud(int cloudId, int style, float pointSize,

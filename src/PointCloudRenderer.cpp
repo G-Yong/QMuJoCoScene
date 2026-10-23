@@ -1,5 +1,7 @@
 #include "PointCloudRenderer.h"
 
+#include "OverlayCamera.h"
+
 #include <QOpenGLContext>
 #include <QOpenGLExtraFunctions>
 #include <QOpenGLShaderProgram>
@@ -567,28 +569,27 @@ void PointCloudRenderer::retainOnly(const std::vector<int>& keepIds) {
 
 float PointCloudRenderer::projectionHalfWidth(float frustumWidth, float frustumBottom,
                                               float frustumTop, float sceneW, float sceneH) {
-    if (frustumWidth != 0.0f) return frustumWidth;
-    const float span = frustumTop - frustumBottom;
-    if (sceneH > 0.0f) return 0.5f * span * (sceneW / sceneH);
-    return 0.5f * span;
+    // 实现抽到 OverlayCamera.h，描边 G-buffer 的相机构造共用同一份规则。
+    return overlayProjectionHalfWidth(frustumWidth, frustumBottom, frustumTop,
+                                      static_cast<int>(sceneW), static_cast<int>(sceneH));
 }
 
 QMatrix4x4 PointCloudRenderer::viewportInsetMatrix(float sceneX, float sceneY,
                                                    float sceneW, float sceneH,
                                                    float fullW, float fullH) {
-    QMatrix4x4 m;   // 单位阵 = 无 inset（场景即整幅视口）
-    if (fullW <= 0.0f || fullH <= 0.0f || sceneW <= 0.0f || sceneH <= 0.0f)
-        return m;
-    // 期望像素 px = sceneX + (s+1)/2*sceneW，整幅下 px = (s'+1)/2*fullW
-    //   ⇒ s' = (sceneW/fullW)*s + (2*sceneX + sceneW)/fullW - 1
-    const float ax = sceneW / fullW;
-    const float ay = sceneH / fullH;
-    const float bx = (2.0f * sceneX + sceneW) / fullW - 1.0f;
-    const float by = (2.0f * sceneY + sceneH) / fullH - 1.0f;
-    m.setToIdentity();
-    m(0, 0) = ax;  m(0, 3) = bx;
-    m(1, 1) = ay;  m(1, 3) = by;
-    return m;
+    return overlayViewportInsetMatrix(sceneX, sceneY, sceneW, sceneH, fullW, fullH);
+}
+
+bool PointCloudRenderer::clipControlSupported() {
+    static const bool supported = [] {
+        QOpenGLContext* ctx = QOpenGLContext::currentContext();
+        if (!ctx) return false;
+        const bool versionOk = ctx->format().version() >= qMakePair(4, 5);
+        const bool extensionOk = ctx->hasExtension(QByteArrayLiteral("GL_ARB_clip_control"));
+        if (!versionOk && !extensionOk) return false;
+        return ctx->getProcAddress(QByteArrayLiteral("glClipControl")) != nullptr;
+    }();
+    return supported;
 }
 
 void PointCloudRenderer::beginFrame(unsigned int targetFbo, int viewportW, int viewportH,
@@ -610,66 +611,28 @@ void PointCloudRenderer::beginFrame(unsigned int targetFbo, int viewportW, int v
     m_viewportW = viewportW;
     m_targetFbo = targetFbo;
     m_reflBuiltThisFrame = false;
-    m_camPos = QVector3D(camPos[0], camPos[1], camPos[2]);
 
     // --- 复制 MuJoCo render_gl3.c setView() 的投影/视图/深度约定 ---------
-    // 视图矩阵：lookAt(pos, pos+forward, up)，再叠加 scene transform。
-    const QVector3D pos(camPos[0], camPos[1], camPos[2]);
-    const QVector3D fwd(camForward[0], camForward[1], camForward[2]);
-    const QVector3D up(camUp[0], camUp[1], camUp[2]);
-    m_view.setToIdentity();
-    m_view.lookAt(pos, pos + fwd, up);
-    if (sceneTransform) {
-        m_view.translate(translate[0], translate[1], translate[2]);
-        m_view.rotate(QQuaternion(rotateQuat[0], rotateQuat[1],
-                                  rotateQuat[2], rotateQuat[3]));
-        m_view.scale(scale);
+    // 纯计算抽到 OverlayCamera.h：描边 G-buffer 也用它，保证两边不跑偏。
+    const OverlayCamera cam = buildOverlayCamera(
+        viewportW, viewportH, sceneX, sceneY, sceneW, sceneH,
+        camPos, camForward, camUp,
+        frustumCenter, frustumWidth, frustumBottom, frustumTop,
+        frustumNear, frustumFar, orthographic,
+        sceneTransform, translate, rotateQuat, scale,
+        clipControlSupported());
+
+    m_view = cam.view;
+    m_proj = cam.proj;
+    m_invViewProj = cam.invViewProj;
+    m_projYY = cam.projYY;
+    m_camPos = cam.camPos;
+    m_clipZeroToOne = cam.clipZeroToOne;
+    if (m_clipZeroToOne) {
+        auto clipControlFn = reinterpret_cast<PfnGlClipControl>(
+            ctx->getProcAddress(QByteArrayLiteral("glClipControl")));
+        if (clipControlFn) clipControlFn(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
     }
-
-    // 投影：halfwidth 匹配"场景视口"的宽高比（与 mjr_render 的 rect[3] 一致）。
-    const float halfwidth = projectionHalfWidth(
-        frustumWidth, frustumBottom, frustumTop,
-        static_cast<float>(sceneW), static_cast<float>(sceneH));
-    const float left  = frustumCenter - halfwidth;
-    const float right = frustumCenter + halfwidth;
-
-    QMatrix4x4 frustum;
-    if (orthographic)
-        frustum.ortho(left, right, frustumBottom, frustumTop, frustumNear, frustumFar);
-    else
-        frustum.frustum(left, right, frustumBottom, frustumTop, frustumNear, frustumFar);
-
-    // MuJoCo 使用 reverse-Z。是否启用 ARB_clip_control 决定 Z 映射方式。
-    const bool clipControl =
-        ctx->format().version() >= qMakePair(4, 5) ||
-        ctx->hasExtension(QByteArrayLiteral("GL_ARB_clip_control"));
-    auto clipControlFn = reinterpret_cast<PfnGlClipControl>(
-        ctx->getProcAddress(QByteArrayLiteral("glClipControl")));
-
-    QMatrix4x4 zflip;
-    if (clipControl && clipControlFn) {
-        clipControlFn(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
-        zflip.translate(0.0f, 0.0f, 0.5f);
-        zflip.scale(1.0f, 1.0f, -0.5f);
-        m_clipZeroToOne = true;
-    } else {
-        zflip.scale(1.0f, 1.0f, -1.0f);
-        m_clipZeroToOne = false;
-    }
-    m_proj = zflip * frustum;
-    // 场景在 FBO 里 inset（MuJoCo UI 侧栏）时，把"场景视口 → 整幅"的裁剪空间
-    // 变换叠加到投影上：glViewport 仍用整幅（点大小/倒影等像素空间逻辑不变），
-    // 但内容只落在 rect[3] 内，与 mjr_render 逐像素对齐。
-    m_proj = viewportInsetMatrix(static_cast<float>(sceneX), static_cast<float>(sceneY),
-                                 static_cast<float>(sceneW), static_cast<float>(sceneH),
-                                 static_cast<float>(viewportW), static_cast<float>(viewportH))
-             * m_proj;
-
-    // 从深度反算世界坐标用的逆矩阵（散射倒影遮挡深度用）。
-    m_invViewProj = (m_proj * m_view).inverted();
-
-    // 世界尺寸 → 像素换算系数（= 投影矩阵 y 缩放，已含上面的 inset 变换）。
-    m_projYY = m_proj(1, 1);
 
     // --- GL 状态 -------------------------------------------------------
     gl->glBindFramebuffer(GL_FRAMEBUFFER, targetFbo);
