@@ -24,6 +24,11 @@ https://github.com/user-attachments/assets/49a18818-608c-457d-b89a-a16b8b40a035
 - **拖拽加载模型**：直接将 `.xml` / `.mjb` 文件拖入窗口即可热切换模型。
 - **独立 GPU 优先**：导出 `NvOptimusEnablement` / `AmdPowerXpressRequestHighPerformance` 符号，在双显卡笔记本上自动选用独立 GPU。
 - **物体运动轨迹可视化**：`MujocoQuickItem` 提供的 `addTrajectory` / `setTrajectoryTrackedSite` 等接口（见 [`MujocoQuickItem.h`](https://github.com/G-Yong/QMuJoCoScene/blob/master/src/MujocoQuickItem.h)），允许用户在 QML 端创建和管理轨迹对象，实时可视化指定物体的运动轨迹（动态刷新）。
+- **拖动示教 gizmo（6-DoF）**：在指定 site（默认 `tcp`）上叠加 rviz 风格的交互手柄（3 个旋转环 + 6 根平移箭头 + 3 个平面拖动块）。`gizmoToolAligned` 切换世界轴 / 工具坐标系对齐，`gizmoConstantScreenSize` + `gizmoScreenSizePx` 让手柄在屏幕上恒定大小，`gizmoAlwaysOnTop` 使其不被场景遮挡。拖动时连续发出 `gizmoPoseEdited(position, orientation)`（位置米 / 世界系四元数），由上层决定如何落点（如 IK）。
+- **表面吸附**：拖动时按住 `Ctrl`（或打开 `gizmoSnapAlwaysOn`）可把 TCP **位置**吸附到最近的物体表面，姿态保持不变。`gizmoSnapThreshold`（米，默认 0.010）内进入吸附，拖离 2× 才脱开；自动排除当前示教机器人自身的连杆与工具；支持 `plane` / `box` / `sphere` / `cylinder` / `capsule` / `ellipsoid` / `mesh` 七类几何。`snapSelfTest()` 返回空串表示几何自检通过。
+- **附加轴 gizmo（变位机）**：`setAdditionalAxes({...})` 给机器人本体之外的 `hinge` / `slide` 关节挂上旋转环或平移箭头，拖动**直接写 qpos**、不经逆解，适合变位机等外部轴。
+- **接触点标记与轮廓描边**：`contacts` 属性配合 `setContactMarkersEnabled` 系列接口把 MuJoCo 接触点画成屏幕标记（模式 / 像素直径 / 填充与描边颜色 / 闪烁频率）；`setOutlineEnabled` 系列给物体描边（颜色、像素宽、折痕角、深度阈值）。
+- **仿真历史回放与场景编辑**：`historyCapacity` / `historyDepth` / `historyScrubIndex` + `seekHistory(i)` 可回看任意历史时刻的 qpos；`addVisualPrimitive` / `setObjectPosition` / `setObjectSize` / `addStaticObstacle` 可在运行时增删与摆动物体；`cameraState()` / `setCameraState()` 配合 `cameraTransitionDuration` 保存并带动画恢复视角。
 - **点云渲染**：通过 GPU `GL_POINTS` 叠加层实现高性能点云可视化，共享 MuJoCo 渲染帧缓冲的深度缓冲（reverse-Z），与场景几何正确互遮挡。一次 draw call，百万级点。支持四种渲染样式：`PointStylePixel`（固定像素）、`PointStyleSquare`（世界尺寸方形）、`PointStyleCircle`（世界尺寸圆形）、`PointStyleSphere`（世界尺寸、球面着色 billboard）。支持逐点颜色、统一颜色、地面倒影（仿 MuJoCo 反射地面）。
 - **点云碰撞检测**：点云数据通过 `pointCloudPoints()` 等线程安全访问器暴露给外部碰撞库（如 [coal](https://github.com/coal-library/coal)），外部库的接触结果经 `withMutableSimulation()` 写回 MuJoCo。详见 `demo/pointcloudcollision.{h,cpp}` 示例。提供高效 C++ 扁平数组接口（`setPointCloudData`，避免 QVariant 装箱开销）和 QML 友好的 QVariant 接口（`addPointCloud` / `updatePointCloudPoints` / `setPointCloudColors`）。
 
@@ -149,6 +154,42 @@ if (mujocoViewItem)
 ```
 
 **QML 拖拽加载**：demo 中的 `DropArea` 示例可直接复用，将 `.xml` / `.mjb` 拖入窗口即可切换。
+
+## 拖动示教（gizmo）与表面吸附
+
+`MujocoQuickItem` 内置一个 rviz 风格的 6-DoF 交互手柄，叠加在指定 site（默认 `tcp`）上，
+拖动结果以信号形式交回给上层 —— 库本身不做逆解，怎么用由你决定。
+
+```qml
+MujocoView {
+    id: view
+
+    gizmoVisible: true           // 显示手柄（跟踪 site "tcp"）
+    gizmoToolAligned: true       // 手柄对齐工具坐标系（false = 世界轴）
+    gizmoAlwaysOnTop: true       // 不被场景物体遮挡
+    gizmoScreenSizePx: 320       // 手柄在屏幕上的直径（像素，恒定大小）
+
+    gizmoSnapEnabled: true       // 按住 Ctrl 时把 TCP 位置吸附到物体表面
+    gizmoSnapAlwaysOn: false     // true = 不用按 Ctrl 也吸附
+    gizmoSnapThreshold: 0.010    // 吸附距离（米），拖离 2 倍距离才脱开
+
+    onGizmoPoseEdited: function(position, orientation) {
+        // position: 世界系位置（米）；orientation: 世界系四元数
+        // 在这里做 IK / 碰撞检查 / 记录示教点……
+        solveAndApply(position, orientation)
+    }
+}
+```
+
+几个要点：
+
+- **只有位置会被吸附**，姿态保持拖动时的值（需要时用旋转环自己调）。
+- 吸附目标自动排除**当前示教机器人自身**（含工具）的整棵子树，其余（地面、工件、障碍物、其它机器人）都可吸。
+- `Ctrl` 是瞬时触发键，可在拖动过程中按下/松开立即生效（不需要动鼠标）；
+  若希望整个示教过程都吸，把 `gizmoSnapAlwaysOn` 设为 `true`。
+- 几何正确性可用 `snapSelfTest()` 自检：返回空串 = 通过（覆盖七类 geom、子树排除、回差规则）。
+- 附加轴（变位机）另有一套 gizmo：`setAdditionalAxes(["joint_ext1", "joint_ext2"])`，
+  拖动直接写 `qpos`，不走逆解，也不参与吸附。
 
 ## 模型库
 

@@ -24,6 +24,11 @@ https://github.com/user-attachments/assets/49a18818-608c-457d-b89a-a16b8b40a035
 - **Drag-and-drop model loading**: Drop a `.xml` or `.mjb` file directly onto the window to hot-swap the model.
 - **Discrete GPU preference**: Exports `NvOptimusEnablement` / `AmdPowerXpressRequestHighPerformance` symbols so the driver automatically selects the discrete GPU on dual-GPU laptops.
 - **Object trajectory visualisation**: The `addTrajectory` and `setTrajectoryTrackedSite` APIs in [`MujocoQuickItem.h`](https://github.com/G-Yong/QMuJoCoScene/blob/master/src/MujocoQuickItem.h) let users create and manage trajectory objects from QML, providing real-time visualisation of body motion paths (dynamically updated each frame).
+- **Drag-teaching gizmo (6-DoF)**: A rviz-style handle (3 rotation rings + 6 translation arrows + 3 plane pads) drawn on a target site (default `tcp`). `gizmoToolAligned` switches between world axes and the tool frame, `gizmoConstantScreenSize` + `gizmoScreenSizePx` keep the handle at a constant on-screen size, and `gizmoAlwaysOnTop` keeps it visible through geometry. Dragging emits `gizmoPoseEdited(position, orientation)` (metres / world quaternion) continuously — the host decides what to do with it (e.g. IK).
+- **Surface snapping**: Hold `Ctrl` while dragging (or enable `gizmoSnapAlwaysOn`) to snap the TCP **position** onto the nearest object surface; orientation is left untouched. Snapping engages within `gizmoSnapThreshold` (metres, default 0.010) and releases at 2×. The currently taught robot (links + tool subtree) is excluded automatically. Supported geoms: `plane` / `box` / `sphere` / `cylinder` / `capsule` / `ellipsoid` / `mesh`. `snapSelfTest()` returns an empty string when the geometry self-test passes.
+- **Additional-axis gizmo (positioners)**: `setAdditionalAxes({...})` attaches rings / arrows to `hinge` / `slide` joints outside the robot itself. Dragging writes `qpos` directly (no IK) — handy for positioners and other external axes.
+- **Contact markers and outlines**: The `contacts` property plus the `setContactMarkersEnabled` family render MuJoCo contacts as on-screen markers (mode, pixel diameter, fill/outline colours, blink rate); the `setOutlineEnabled` family adds outlines to bodies (colour, pixel width, crease angle, depth threshold).
+- **History playback and scene editing**: `historyCapacity` / `historyDepth` / `historyScrubIndex` with `seekHistory(i)` replay any past qpos state; `addVisualPrimitive` / `setObjectPosition` / `setObjectSize` / `addStaticObstacle` add and move objects at runtime; `cameraState()` / `setCameraState()` with `cameraTransitionDuration` save and smoothly restore the view.
 - **Point cloud rendering**: High-performance point cloud visualisation via a GPU `GL_POINTS` overlay layer that shares MuJoCo's depth buffer (reverse-Z) for correct occlusion with scene geometry. Millions of points in a single draw call. Four render styles: `PointStylePixel` (fixed screen pixels), `PointStyleSquare` (world-size square), `PointStyleCircle` (world-size circle), `PointStyleSphere` (world-size sphere billboard with shading). Per-point colours, uniform colours, and ground reflections (matching MuJoCo's reflective floor).
 - **Point cloud collision detection**: Point cloud data is exposed to external collision libraries (e.g. [coal](https://github.com/coal-library/coal)) via thread-safe accessors such as `pointCloudPoints()`. Contact results from the external library are fed back into MuJoCo through `withMutableSimulation()`. See `demo/pointcloudcollision.{h,cpp}` for a complete example. Offers both a high-performance C++ flat-array API (`setPointCloudData`, avoiding QVariant boxing overhead) and a QML-friendly QVariant API (`addPointCloud` / `updatePointCloudPoints` / `setPointCloudColors`).
 
@@ -150,6 +155,42 @@ if (mujocoViewItem)
 ```
 
 **QML drag-and-drop**: The `DropArea` example in the demo can be reused directly — drag a `.xml` or `.mjb` file onto the window to switch models.
+
+## Drag-Teaching Gizmo and Surface Snapping
+
+`MujocoQuickItem` ships a rviz-style 6-DoF handle drawn on a target site (default `tcp`).
+Dragging is reported as a signal — the library does no IK; what happens next is up to you.
+
+```qml
+MujocoView {
+    id: view
+
+    gizmoVisible: true           // show the handle (tracks site "tcp")
+    gizmoToolAligned: true       // align to the tool frame (false = world axes)
+    gizmoAlwaysOnTop: true       // never occluded by geometry
+    gizmoScreenSizePx: 320       // constant on-screen diameter (px)
+
+    gizmoSnapEnabled: true       // hold Ctrl to snap the TCP onto a surface
+    gizmoSnapAlwaysOn: false     // true = snap without holding Ctrl
+    gizmoSnapThreshold: 0.010    // snap distance (metres); releases at 2x
+
+    onGizmoPoseEdited: function(position, orientation) {
+        // position: world-space metres; orientation: world-space quaternion
+        solveAndApply(position, orientation)
+    }
+}
+```
+
+Notes:
+
+- **Only the position snaps**; the orientation stays exactly as dragged.
+- The taught robot's own subtree (links + tool) is excluded from snapping; the ground, workpieces,
+  obstacles and other robots all remain valid targets.
+- `Ctrl` is momentary and takes effect immediately during a drag (no mouse movement required).
+  Set `gizmoSnapAlwaysOn` to snap for the whole teaching session.
+- `snapSelfTest()` verifies the geometry (all seven geom types, subtree exclusion, hysteresis).
+- External axes (positioners) use a separate gizmo: `setAdditionalAxes(["joint_ext1", "joint_ext2"])`
+  writes `qpos` directly and does not participate in snapping.
 
 ## Model Library
 
