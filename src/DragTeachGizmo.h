@@ -78,11 +78,11 @@ public:
     bool setConstantScreenSize(bool on);
     bool setScreenSizePx(double px);
     bool setAlwaysOnTop(bool on);
-    // 吸附：总开关（默认开）/ 无需按 Ctrl 也吸附（默认关）/ 吸附距离（mm，脱开 = 2×）。
+    // 吸附：总开关（默认开）/ 无需按 Ctrl 也吸附（默认关）/ 吸附距离（米，脱开 = 2×）。
     bool setSnapEnabled(bool on);
     bool setSnapAlwaysOn(bool on);
-    bool setSnapThresholdMm(double mm);
-    double snapThresholdMm() const { return double(m_snapper.absorbThresholdM()) * 1000.0; }
+    bool setSnapThreshold(double meters);
+    double snapThreshold() const { return double(m_snapper.absorbThresholdM()); }
     void setLastMouse(const QPointF& p) { m_lastMouse = p; }
 
     // ---- 每帧（宿主持 sim.mtx 后调用）------------------------------------

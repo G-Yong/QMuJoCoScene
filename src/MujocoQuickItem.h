@@ -118,9 +118,10 @@ class MUJOCOQUICKITEM_EXPORT MujocoQuickItem : public QQuickFramebufferObject, p
     // 表面吸附：拖动时把 TCP **位置**吸附到最近的物体表面（姿态不变）。
     // gizmoSnapEnabled = 功能总开关（默认 true）；按住 Ctrl 时生效。
     // gizmoSnapAlwaysOn = 无需按 Ctrl 也吸附（默认 false）。
+    // gizmoSnapThreshold = 进入吸附的距离（米，默认 0.010 = 10 mm），脱开阈值 = 2×。
     Q_PROPERTY(bool gizmoSnapEnabled READ gizmoSnapEnabled WRITE setGizmoSnapEnabled NOTIFY gizmoSnapEnabledChanged)
     Q_PROPERTY(bool gizmoSnapAlwaysOn READ gizmoSnapAlwaysOn WRITE setGizmoSnapAlwaysOn NOTIFY gizmoSnapAlwaysOnChanged)
-    Q_PROPERTY(double gizmoSnapThresholdMm READ gizmoSnapThresholdMm WRITE setGizmoSnapThresholdMm NOTIFY gizmoSnapThresholdMmChanged)
+    Q_PROPERTY(double gizmoSnapThreshold READ gizmoSnapThreshold WRITE setGizmoSnapThreshold NOTIFY gizmoSnapThresholdChanged)
     // TCP 世界位置（米）—— 模型加载后每帧刷新（不依赖 gizmo 可见性）。姿态不对外
     // 暴露；设位置用下面的 setTcpPosition()（走 IK）。
     Q_PROPERTY(QVector3D tcpPosition READ tcpPosition NOTIFY tcpPositionChanged)
@@ -370,14 +371,14 @@ public:
     // gizmo 是否一直显示在最前面（不被物体遮挡），默认 true。
     bool   gizmoAlwaysOnTop() const { return m_gizmo.alwaysOnTop(); }
     void   setGizmoAlwaysOnTop(bool on);
-    // 表面吸附（见 Q_PROPERTY 注释）。阈值单位 mm，脱开阈值 = 2×；
+    // 表面吸附（见 Q_PROPERTY 注释）。阈值单位米（与 setGizmoSize 等一致），脱开阈值 = 2×；
     // 吸附只在平移箭头 / 平面拖动时生效（旋转拖动不改位置，无需吸附）。
     bool   gizmoSnapEnabled() const { return m_gizmo.snapEnabled(); }
     void   setGizmoSnapEnabled(bool on);
     bool   gizmoSnapAlwaysOn() const { return m_gizmo.snapAlwaysOn(); }
     void   setGizmoSnapAlwaysOn(bool on);
-    double gizmoSnapThresholdMm() const { return m_gizmo.snapThresholdMm(); }
-    void   setGizmoSnapThresholdMm(double mm);
+    double gizmoSnapThreshold() const { return m_gizmo.snapThreshold(); }
+    void   setGizmoSnapThreshold(double meters);
     // 吸附几何求解的自检：返回空串 = 通过，否则为失败描述（含 plane/box/sphere/
     // cylinder/capsule/ellipsoid/mesh 的最近点、机器人子树排除、回差规则）。
     Q_INVOKABLE QString snapSelfTest() const;
@@ -958,7 +959,7 @@ signals:
     // 表面吸附：开关 / 阈值变化。
     void gizmoSnapEnabledChanged();
     void gizmoSnapAlwaysOnChanged();
-    void gizmoSnapThresholdMmChanged();
+    void gizmoSnapThresholdChanged();
     // TCP 位置（tcpPosition）变化：值真的变了才发。
     void tcpPositionChanged();
     // 关节值的角度单位（jointValuesDegrees）变化。

@@ -1550,9 +1550,9 @@ void MujocoQuickItem::setGizmoSnapAlwaysOn(bool on) {
     emit gizmoSnapAlwaysOnChanged();
 }
 
-void MujocoQuickItem::setGizmoSnapThresholdMm(double mm) {
-    if (!m_gizmo.setSnapThresholdMm(mm)) return;
-    emit gizmoSnapThresholdMmChanged();
+void MujocoQuickItem::setGizmoSnapThreshold(double meters) {
+    if (!m_gizmo.setSnapThreshold(meters)) return;
+    emit gizmoSnapThresholdChanged();
 }
 
 QString MujocoQuickItem::snapSelfTest() const {

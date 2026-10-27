@@ -219,11 +219,10 @@ bool DragTeachGizmo::setSnapAlwaysOn(bool on) {
     return true;
 }
 
-bool DragTeachGizmo::setSnapThresholdMm(double mm) {
-    const double v = std::clamp(mm, 0.1, 500.0);
-    const double cur = double(m_snapper.absorbThresholdM()) * 1000.0;
-    if (std::abs(cur - v) < 1e-9) return false;
-    m_snapper.setThresholdM(float(v * 0.001), float(v * 0.002));
+bool DragTeachGizmo::setSnapThreshold(double meters) {
+    const double v = std::clamp(meters, 0.0001, 0.5);   // 0.1 mm ~ 500 mm
+    if (std::abs(double(m_snapper.absorbThresholdM()) - v) < 1e-9) return false;
+    m_snapper.setThresholdM(float(v), float(v * 2.0));
     return true;
 }
 
