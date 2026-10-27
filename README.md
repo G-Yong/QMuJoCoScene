@@ -14,6 +14,8 @@ https://github.com/user-attachments/assets/49a18818-608c-457d-b89a-a16b8b40a035
 
 ![snapshot](assets/pointCloud.png)
 
+![gizmo](assets/gizmo.png)
+
 ## Features
 
 - **Zero GLFW dependency**: `QtPlatformUIAdapter` replaces the official `GlfwAdapter`; all OpenGL context management and event handling are driven by Qt.

@@ -14,6 +14,8 @@ https://github.com/user-attachments/assets/49a18818-608c-457d-b89a-a16b8b40a035
 
 ![snapshot](assets/pointCloud.png)
 
+![gizmo](assets/gizmo.png)
+
 ## 特性
 
 - **零 GLFW 依赖**：用 `QtPlatformUIAdapter` 替换官方 `GlfwAdapter`，所有 OpenGL 上下文、事件均由 Qt 管理。
