@@ -18,6 +18,8 @@
 //   9..11 平面拖动 XY/YZ/ZX（两轴联动）
 // ---------------------------------------------------------------------------
 
+#include "SurfaceSnapper.h"
+
 #include <QMatrix4x4>
 #include <QPointF>
 #include <QQuaternion>
@@ -63,6 +65,10 @@ public:
     double      screenSizePx() const { return m_screenSizePx; }
     bool        alwaysOnTop() const { return m_alwaysOnTop; }
 
+    // ---- 表面吸附 ---------------------------------------------------------
+    bool        snapEnabled() const { return m_snapFeature; }
+    bool        snapAlwaysOn() const { return m_snapAlwaysOn; }
+
     // ---- 状态设置（只改字段；重建 geom / 发信号由宿主负责）----------------
     // setter 返回是否真的变了，宿主据此决定要不要重建 / 发信号。
     bool setVisible(bool on);            // 隐藏时顺带清 dragging/active/hovered
@@ -72,6 +78,11 @@ public:
     bool setConstantScreenSize(bool on);
     bool setScreenSizePx(double px);
     bool setAlwaysOnTop(bool on);
+    // 吸附：总开关（默认开）/ 无需按 Ctrl 也吸附（默认关）/ 吸附距离（mm，脱开 = 2×）。
+    bool setSnapEnabled(bool on);
+    bool setSnapAlwaysOn(bool on);
+    bool setSnapThresholdMm(double mm);
+    double snapThresholdMm() const { return double(m_snapper.absorbThresholdM()) * 1000.0; }
     void setLastMouse(const QPointF& p) { m_lastMouse = p; }
 
     // ---- 每帧（宿主持 sim.mtx 后调用）------------------------------------
@@ -90,14 +101,17 @@ public:
     bool press(const QPointF& mouse, const QMatrix4x4& vp, float w, float h);
     // 拖动移动：内部按 dragMode 解算目标位姿并写回 m_pos/m_ori。返回是否处于拖动
     //（true = 已消费）；poseEdited=true 时 outPos/outOri 有效，宿主需要 emit + IK。
+    // snapActive=true 时把位置吸附到最近表面点（姿态不变）；m/d 只读，用于查询几何。
     bool move(const QPointF& mouse, const QMatrix4x4& vp, const QVector3D& camPos,
-              float w, float h, QVector3D& outPos, QQuaternion& outOri, bool& poseEdited);
+              float w, float h, const mjModel* m, const mjData* d, bool snapActive,
+              QVector3D& outPos, QQuaternion& outOri, bool& poseEdited);
     // 松手：返回此前是否在拖动。IK 不可解时把位姿弹回上一次可解值。
     bool release();
     // 悬停：更新高亮手柄，返回是否变化。
     bool updateHover(const QPointF& mouse, const QMatrix4x4& vp, float w, float h);
     // 宿主在 gizmoPoseEdited 槽里回告本次目标位姿 IK 是否可解。
-    void reportSolvable(bool solvable);
+    // 返回 true = 吸附让位导致位姿变了，宿主需要重建几何。
+    bool reportSolvable(bool solvable);
 
     // ---- always-on-top 叠加层（渲染线程读）------------------------------
     // 线程安全地拷走当前叠加层线段（内部 mutex，不走 sim.mtx）。
@@ -131,6 +145,15 @@ private:
     QVector3D   m_solvablePos;         // 最近一次 IK 可解的位姿
     QQuaternion m_solvableOri;
     bool        m_lastSolvable = true;
+
+    // 吸附：自由位姿累加器（鼠标位移只作用在它上面，吸附只改 m_pos）。
+    QVector3D   m_freePos;
+    QQuaternion m_freeOri;
+    bool        m_snapFeature  = true;    // 总开关
+    bool        m_snapAlwaysOn = false;   // 无需按 Ctrl 也吸附
+    bool        m_snapSuppressed = false; // 吸附导致 IK 不可解时，暂时放弃吸附
+    QVector3D   m_snapSuppressPos;        // 放弃吸附时的自由位姿（挪开后恢复）
+    SurfaceSnapper m_snapper;
 
     // 尺寸参数：m_worldSize 是手动固定世界尺寸（关掉恒定屏幕尺寸时生效）。
     float       m_worldSize = 0.12f;

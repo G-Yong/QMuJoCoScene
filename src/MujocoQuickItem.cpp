@@ -1530,10 +1530,44 @@ void MujocoQuickItem::setGizmoAlwaysOnTop(bool on) {
     emit gizmoAlwaysOnTopChanged();
 }
 
+void MujocoQuickItem::setGizmoSnapEnabled(bool on) {
+    if (!m_gizmo.setSnapEnabled(on)) return;
+    if (m_sim) {
+        std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+        rebuildTrajectoryGeomsLocked();
+    }
+    requestRenderUpdate();
+    emit gizmoSnapEnabledChanged();
+}
+
+void MujocoQuickItem::setGizmoSnapAlwaysOn(bool on) {
+    if (!m_gizmo.setSnapAlwaysOn(on)) return;
+    if (m_sim) {
+        std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+        rebuildTrajectoryGeomsLocked();
+    }
+    requestRenderUpdate();
+    emit gizmoSnapAlwaysOnChanged();
+}
+
+void MujocoQuickItem::setGizmoSnapThresholdMm(double mm) {
+    if (!m_gizmo.setSnapThresholdMm(mm)) return;
+    emit gizmoSnapThresholdMmChanged();
+}
+
+QString MujocoQuickItem::snapSelfTest() const {
+    return SurfaceSnapper::selfTest();
+}
+
 void MujocoQuickItem::reportGizmoEditSolvable(bool solvable) {
     if (!m_sim) return;
-    std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
-    m_gizmo.reportSolvable(solvable);
+    bool needRebuild = false;
+    {
+        std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
+        needRebuild = m_gizmo.reportSolvable(solvable);
+        if (needRebuild) rebuildTrajectoryGeomsLocked();
+    }
+    if (needRebuild) requestRenderUpdate();
 }
 
 bool MujocoQuickItem::setTcpPosition(const QVector3D& position) {
@@ -1570,6 +1604,7 @@ bool MujocoQuickItem::setTcpPosition(const QVector3D& position) {
 // -------------------------------------------------------------- 交互处理 ----
 bool MujocoQuickItem::gizmoHandleMousePress(const QPointF& pos) {
     if (!m_sim) return false;
+    m_lastGizmoMousePos = pos;
     bool consumed = false;
     {
         std::unique_lock<std::recursive_mutex> lk(m_sim->mtx);
@@ -1594,6 +1629,7 @@ bool MujocoQuickItem::gizmoHandleMousePress(const QPointF& pos) {
 
 bool MujocoQuickItem::gizmoHandleMouseMove(const QPointF& pos) {
     if (!m_sim) return false;
+    m_lastGizmoMousePos = pos;
     QVector3D emitPos; QQuaternion emitOri; bool doEmit = false;
     QString axisJoint; double axisValue = 0.0; bool axisEmit = false;
     {
@@ -1601,8 +1637,12 @@ bool MujocoQuickItem::gizmoHandleMouseMove(const QPointF& pos) {
         QMatrix4x4 vp; QVector3D camPos;
         if (m_gizmo.dragging()) {
             if (!buildGizmoCameraLocked(vp, camPos)) { m_gizmo.setLastMouse(pos); return true; }
+            // Ctrl 按住（或“吸附常开”）时把位置吸附到最近表面；姿态不变。
+            const bool snapActive = m_gizmo.snapEnabled() &&
+                                    (m_gizmo.snapAlwaysOn() || m_gizmoSnapCtrlDown);
             bool poseEdited = false;
             m_gizmo.move(pos, vp, camPos, float(width()), float(height()),
+                         m_sim->m_, m_sim->d_, snapActive,
                          emitPos, emitOri, poseEdited);
             rebuildTrajectoryGeomsLocked();
             doEmit = poseEdited;
@@ -4748,6 +4788,8 @@ void MujocoQuickItem::mouseReleaseEvent(QMouseEvent* e) {
     e->accept();
 }
 void MujocoQuickItem::mouseMoveEvent(QMouseEvent* e) {
+    // Ctrl 是表面吸附的瞬时触发键；鼠标事件里的修饰键比键盘事件更可靠。
+    m_gizmoSnapCtrlDown = (e->modifiers() & Qt::ControlModifier) != 0;
     // 拖动 gizmo 时独占鼠标，不转给相机（否则会同时旋转视角）。
     if (gizmoHandleMouseMove(e->pos())) {
         e->accept();
@@ -4805,6 +4847,11 @@ int MujocoQuickItem::qtKeyToMjui(int key) const {
     }
 }
 void MujocoQuickItem::keyPressEvent(QKeyEvent* e) {
+    // 拖动中按下 Ctrl：立即按当前鼠标位置重算一次吸附（不必等鼠标动）。
+    if (e->key() == Qt::Key_Control) {
+        m_gizmoSnapCtrlDown = true;
+        if (gizmoDragging() && m_sim) gizmoHandleMouseMove(m_lastGizmoMousePos);
+    }
     if (!m_adapterRaw) { QQuickFramebufferObject::keyPressEvent(e); return; }
     int mods = int(e->modifiers());
     if (e->key() == Qt::Key_Backtab) mods |= Qt::ShiftModifier;
@@ -4814,6 +4861,10 @@ void MujocoQuickItem::keyPressEvent(QKeyEvent* e) {
     e->accept();
 }
 void MujocoQuickItem::keyReleaseEvent(QKeyEvent* e) {
+    if (e->key() == Qt::Key_Control) {
+        m_gizmoSnapCtrlDown = false;
+        if (gizmoDragging() && m_sim) gizmoHandleMouseMove(m_lastGizmoMousePos);
+    }
     if (!m_adapterRaw) { QQuickFramebufferObject::keyReleaseEvent(e); return; }
     int mods = int(e->modifiers());
     if (e->key() == Qt::Key_Backtab) mods |= Qt::ShiftModifier;

@@ -4,6 +4,7 @@ HEADERS += \
     $$PWD/MujocoQuickItem.h \
     $$PWD/MujocoQuickItemHelpers.h \
     $$PWD/DragTeachGizmo.h \
+    $$PWD/SurfaceSnapper.h \
     $$PWD/AxisGizmo.h \
     $$PWD/PointCloudRenderer.h \
     $$PWD/OverlayCamera.h \
@@ -17,6 +18,7 @@ SOURCES += \
     $$PWD/PointCloudRenderer.cpp \
     $$PWD/OutlineRenderer.cpp \
     $$PWD/DragTeachGizmo.cpp \
+    $$PWD/SurfaceSnapper.cpp \
     $$PWD/AxisGizmo.cpp \
     $$PWD/MujocoQuickItem.cpp
 

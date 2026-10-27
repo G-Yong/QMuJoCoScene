@@ -205,10 +205,35 @@ bool DragTeachGizmo::setAlwaysOnTop(bool on) {
     return true;
 }
 
+bool DragTeachGizmo::setSnapEnabled(bool on) {
+    if (m_snapFeature == on) return false;
+    m_snapFeature = on;
+    if (!on) m_snapper.reset();
+    return true;
+}
+
+bool DragTeachGizmo::setSnapAlwaysOn(bool on) {
+    if (m_snapAlwaysOn == on) return false;
+    m_snapAlwaysOn = on;
+    if (!on) m_snapper.reset();
+    return true;
+}
+
+bool DragTeachGizmo::setSnapThresholdMm(double mm) {
+    const double v = std::clamp(mm, 0.1, 500.0);
+    const double cur = double(m_snapper.absorbThresholdM()) * 1000.0;
+    if (std::abs(cur - v) < 1e-9) return false;
+    m_snapper.setThresholdM(float(v * 0.001), float(v * 0.002));
+    return true;
+}
+
 // --------------------------------------------------------------- 每帧 ----
 bool DragTeachGizmo::updatePoseFromSite(const mjModel* m, const mjData* d) {
     if (!m || !d || !m_visible || m_dragging) return false;
     m_siteId = mj_name2id(m, mjOBJ_SITE, m_siteName.toUtf8().constData());
+    // 吸附排除集合：site 所在 body 的机器人子树（内部有缓存，重复调用开销可忽）。
+    if (m_siteId >= 0 && m_siteId < m->nsite)
+        m_snapper.setTrackedBody(m, m->site_bodyid[m_siteId]);
     if (m_siteId < 0 || m_siteId >= m->nsite) {
         if (m_poseValid) { m_poseValid = false; return true; }
         return false;
@@ -318,6 +343,9 @@ int DragTeachGizmo::rebuildGeoms(mjvScene* userScene, int startIndex) {
                          gcolor, kGuideLineWidthPx);
         }
     }
+
+    // 吸附点不再单独画标记：gizmo 本体已经整体搬到吸附点上（m_pos = 吸附点），
+    // 位置变化本身就足够表达“吸住了”。
 
     // 平移箭头：只画正半轴（handle 1/3/5，仿 Blender）；旋转拖动时整体隐藏。
     for (int handle = 1; !dragR && handle < kTranslateHandleCount && g < maxg; handle += 2) {
@@ -542,18 +570,23 @@ bool DragTeachGizmo::press(const QPointF& mouse, const QMatrix4x4& vp, float w, 
     m_solvablePos = m_pos;
     m_solvableOri = m_ori;
     m_lastSolvable = true;
+    m_freePos = m_pos;
+    m_freeOri = m_ori;
+    m_snapSuppressed = false;
+    m_snapper.reset();
     return true;
 }
 
 bool DragTeachGizmo::move(const QPointF& mouse, const QMatrix4x4& vp, const QVector3D& camPos,
-                          float w, float h, QVector3D& outPos, QQuaternion& outOri,
+                          float w, float h, const mjModel* m, const mjData* d, bool snapActive,
+                          QVector3D& outPos, QQuaternion& outOri,
                           bool& poseEdited) {
     poseEdited = false;
     if (!m_dragging) return false;
 
     const QVector3D axisVecDrag = axisVec(m_dragAxis);
-    QVector3D candPos = m_pos;
-    QQuaternion candOri = m_ori;
+    QVector3D candPos = m_freePos;
+    QQuaternion candOri = m_freeOri;
 
     if (m_dragMode == 0) {
         // 平移：鼠标位移投影到屏幕上的手柄方向（含正负号），换算成世界位移。
@@ -562,8 +595,8 @@ bool DragTeachGizmo::move(const QPointF& mouse, const QMatrix4x4& vp, const QVec
         const float r1 = m_size * kArrowTipScale;
         const float L = r1 - r0;
         bool ok1 = false, ok2 = false;
-        const QPointF s0 = worldToScreen(vp, m_pos + a * r0, w, h, &ok1);
-        const QPointF s1 = worldToScreen(vp, m_pos + a * r1, w, h, &ok2);
+        const QPointF s0 = worldToScreen(vp, m_freePos + a * r0, w, h, &ok1);
+        const QPointF s1 = worldToScreen(vp, m_freePos + a * r1, w, h, &ok2);
         if (ok1 && ok2) {
             QVector2D dir(float(s1.x() - s0.x()), float(s1.y() - s0.y()));
             const float len = dir.length();
@@ -572,7 +605,7 @@ bool DragTeachGizmo::move(const QPointF& mouse, const QMatrix4x4& vp, const QVec
                 const QVector2D md(float(mouse.x() - m_lastMouse.x()),
                                    float(mouse.y() - m_lastMouse.y()));
                 const float screenMove = QVector2D::dotProduct(md, dir);
-                candPos = m_pos + a * (screenMove * (L / len));
+                candPos = m_freePos + a * (screenMove * (L / len));
             }
         }
     } else if (m_dragMode == 2) {
@@ -580,9 +613,9 @@ bool DragTeachGizmo::move(const QPointF& mouse, const QMatrix4x4& vp, const QVec
         const QVector3D u = axisVec(m_dragAxis);
         const QVector3D v = axisVec(m_dragAxisB);
         bool ok0 = false, ok1 = false, ok2 = false;
-        const QPointF s0 = worldToScreen(vp, m_pos, w, h, &ok0);
-        const QPointF su = worldToScreen(vp, m_pos + u, w, h, &ok1);   // 每米对应多少像素
-        const QPointF sv = worldToScreen(vp, m_pos + v, w, h, &ok2);
+        const QPointF s0 = worldToScreen(vp, m_freePos, w, h, &ok0);
+        const QPointF su = worldToScreen(vp, m_freePos + u, w, h, &ok1);   // 每米对应多少像素
+        const QPointF sv = worldToScreen(vp, m_freePos + v, w, h, &ok2);
         if (ok0 && ok1 && ok2) {
             const QVector2D pu(float(su.x() - s0.x()), float(su.y() - s0.y()));
             const QVector2D pv(float(sv.x() - s0.x()), float(sv.y() - s0.y()));
@@ -593,13 +626,13 @@ bool DragTeachGizmo::move(const QPointF& mouse, const QMatrix4x4& vp, const QVec
                 const float dy = float(mouse.y() - m_lastMouse.y());
                 const float dA = (dx * pv.y() - dy * pv.x()) / det;   // 单位：米
                 const float dB = (pu.x() * dy - pu.y() * dx) / det;
-                candPos = m_pos + u * dA + v * dB;
+                candPos = m_freePos + u * dA + v * dB;
             }
         }
     } else {
         // 旋转：鼠标相对屏幕投影中心的转角，方向按轴是否朝向相机翻转。
         bool ok = false;
-        const QPointF cc = worldToScreen(vp, m_pos, w, h, &ok);
+        const QPointF cc = worldToScreen(vp, m_freePos, w, h, &ok);
         if (ok) {
             const QVector2D v0(float(m_lastMouse.x() - cc.x()),
                                float(m_lastMouse.y() - cc.y()));
@@ -607,20 +640,40 @@ bool DragTeachGizmo::move(const QPointF& mouse, const QMatrix4x4& vp, const QVec
             if (v0.length() > 1e-3f && v1.length() > 1e-3f) {
                 const float a0 = std::atan2(v0.y(), v0.x());
                 const float a1 = std::atan2(v1.y(), v1.x());
-                const float facing = QVector3D::dotProduct(axisVecDrag, (m_pos - camPos));
+                const float facing = QVector3D::dotProduct(axisVecDrag, (m_freePos - camPos));
                 const float sign = (facing > 0.0f) ? 1.0f : -1.0f;
                 const float deg = float(qRadiansToDegrees(double(a1 - a0))) * sign;
-                candOri = QQuaternion::fromAxisAndAngle(axisVecDrag, deg) * m_ori;
+                candOri = QQuaternion::fromAxisAndAngle(axisVecDrag, deg) * m_freeOri;
             }
         }
     }
 
-    m_pos = candPos;
-    m_ori = candOri;
+    // 累加器只吃“自由位姿”；吸附只影响 m_pos，不回流到累加器。
+    m_freePos = candPos;
+    m_freeOri = candOri;
+    m_ori = m_freeOri;
+
+    QVector3D finalPos = m_freePos;
+    // IK 不可解导致的“放弃吸附”：自由位姿挪开 1 mm 后才重新尝试。
+    if (m_snapSuppressed && (m_freePos - m_snapSuppressPos).length() > 0.001f)
+        m_snapSuppressed = false;
+
+    const bool wantSnap = m_snapFeature && snapActive && m_dragMode != 1 && !m_snapSuppressed;
+    m_snapper.setEnabled(wantSnap);
+    if (wantSnap && m && d) {
+        if (m_siteId >= 0 && m_siteId < m->nsite)
+            m_snapper.setTrackedBody(m, m->site_bodyid[m_siteId]);
+        SurfaceSnapper::Hit hit;
+        if (m_snapper.query(m, d, m_freePos, hit)) finalPos = hit.point;
+    } else {
+        m_snapper.reset();
+    }
+
+    m_pos = finalPos;
     m_lastMouse = mouse;
     m_lastSolvable = true;
-    outPos = candPos;
-    outOri = candOri;
+    outPos = m_pos;
+    outOri = m_ori;
     poseEdited = true;
     return true;
 }
@@ -630,6 +683,8 @@ bool DragTeachGizmo::release() {
     m_dragging = false;
     m_active = -1;
     m_hovered = -1;
+    m_snapper.reset();
+    m_snapSuppressed = false;
     if (!m_lastSolvable) {   // IK 跟不到位：弹回上一次可解位姿
         m_pos = m_solvablePos;
         m_ori = m_solvableOri;
@@ -649,13 +704,24 @@ bool DragTeachGizmo::updateHover(const QPointF& mouse, const QMatrix4x4& vp, flo
     return true;
 }
 
-void DragTeachGizmo::reportSolvable(bool solvable) {
-    if (!m_dragging) return;
+bool DragTeachGizmo::reportSolvable(bool solvable) {
+    if (!m_dragging) return false;
     m_lastSolvable = solvable;
     if (solvable) {
         m_solvablePos = m_pos;
         m_solvableOri = m_ori;
+        return false;
     }
+    // 吸附导致 IK 不可解：放弃吸附，把 gizmo 退回自由位姿（吸附自动让位）。
+    if (m_snapper.snapped()) {
+        m_snapSuppressed = true;
+        m_snapSuppressPos = m_freePos;
+        m_snapper.reset();
+        m_pos = m_freePos;
+        m_ori = m_freeOri;
+        return true;
+    }
+    return false;
 }
 
 std::vector<DragTeachGizmo::LineBatch> DragTeachGizmo::overlayLinesCopy() const {

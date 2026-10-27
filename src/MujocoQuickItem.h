@@ -115,6 +115,12 @@ class MUJOCOQUICKITEM_EXPORT MujocoQuickItem : public QQuickFramebufferObject, p
     //（画进 user_scn 的副本被撤下，改由一个关掉深度测试的叠加层绘制）；false = 和普通
     // 几何一样参与深度、会被前景物体挡住。仅线框模式（kGizmoWireframe，默认开）下生效。
     Q_PROPERTY(bool gizmoAlwaysOnTop READ gizmoAlwaysOnTop WRITE setGizmoAlwaysOnTop NOTIFY gizmoAlwaysOnTopChanged)
+    // 表面吸附：拖动时把 TCP **位置**吸附到最近的物体表面（姿态不变）。
+    // gizmoSnapEnabled = 功能总开关（默认 true）；按住 Ctrl 时生效。
+    // gizmoSnapAlwaysOn = 无需按 Ctrl 也吸附（默认 false）。
+    Q_PROPERTY(bool gizmoSnapEnabled READ gizmoSnapEnabled WRITE setGizmoSnapEnabled NOTIFY gizmoSnapEnabledChanged)
+    Q_PROPERTY(bool gizmoSnapAlwaysOn READ gizmoSnapAlwaysOn WRITE setGizmoSnapAlwaysOn NOTIFY gizmoSnapAlwaysOnChanged)
+    Q_PROPERTY(double gizmoSnapThresholdMm READ gizmoSnapThresholdMm WRITE setGizmoSnapThresholdMm NOTIFY gizmoSnapThresholdMmChanged)
     // TCP 世界位置（米）—— 模型加载后每帧刷新（不依赖 gizmo 可见性）。姿态不对外
     // 暴露；设位置用下面的 setTcpPosition()（走 IK）。
     Q_PROPERTY(QVector3D tcpPosition READ tcpPosition NOTIFY tcpPositionChanged)
@@ -364,6 +370,17 @@ public:
     // gizmo 是否一直显示在最前面（不被物体遮挡），默认 true。
     bool   gizmoAlwaysOnTop() const { return m_gizmo.alwaysOnTop(); }
     void   setGizmoAlwaysOnTop(bool on);
+    // 表面吸附（见 Q_PROPERTY 注释）。阈值单位 mm，脱开阈值 = 2×；
+    // 吸附只在平移箭头 / 平面拖动时生效（旋转拖动不改位置，无需吸附）。
+    bool   gizmoSnapEnabled() const { return m_gizmo.snapEnabled(); }
+    void   setGizmoSnapEnabled(bool on);
+    bool   gizmoSnapAlwaysOn() const { return m_gizmo.snapAlwaysOn(); }
+    void   setGizmoSnapAlwaysOn(bool on);
+    double gizmoSnapThresholdMm() const { return m_gizmo.snapThresholdMm(); }
+    void   setGizmoSnapThresholdMm(double mm);
+    // 吸附几何求解的自检：返回空串 = 通过，否则为失败描述（含 plane/box/sphere/
+    // cylinder/capsule/ellipsoid/mesh 的最近点、机器人子树排除、回差规则）。
+    Q_INVOKABLE QString snapSelfTest() const;
     // 附加轴 / 变位机 gizmo：控制机器人本体之外的单自由度关节（hinge 旋转 / slide 平移）。
     // 拖动**直接改该关节 qpos，不做逆解**；显示与否跟随主 gizmo（gizmoVisible）。
     // jointNames = 要挂 gizmo 的关节名列表；空列表 = 关闭。关节类型自动按模型判定。
@@ -938,6 +955,10 @@ signals:
     void gizmoConstantScreenSizeChanged();
     void gizmoScreenSizePxChanged();
     void gizmoAlwaysOnTopChanged();
+    // 表面吸附：开关 / 阈值变化。
+    void gizmoSnapEnabledChanged();
+    void gizmoSnapAlwaysOnChanged();
+    void gizmoSnapThresholdMmChanged();
     // TCP 位置（tcpPosition）变化：值真的变了才发。
     void tcpPositionChanged();
     // 关节值的角度单位（jointValuesDegrees）变化。
@@ -1146,6 +1167,11 @@ private:
     DragTeachGizmo m_gizmo;
     // 附加轴 / 变位机 gizmo（单自由度关节，拖动直接改 qpos，不做逆解）。显示跟随 m_gizmo。
     AxisGizmo      m_axisGizmo;
+
+    // 表面吸附：Ctrl 状态（吸附的瞬时触发键）与最近一次 gizmo 拖动鼠标位置
+    //（拖动中按下/松开 Ctrl 但不移动鼠标时，用它立刻重算一次吸附）。
+    bool    m_gizmoSnapCtrlDown = false;
+    QPointF m_lastGizmoMousePos;
 
     // 3D 场景视口缓存（MuJoCo UI 侧栏 inset 后的 uistate.rect[3]），单位 = FBO 设备像素。
     // 只在渲染线程写（refreshSceneViewportCache，uistate 的写入线程），GUI 线程只读
